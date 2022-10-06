@@ -1,0 +1,1074 @@
+---
+title: "Variant_Analysis"
+author: "MW"
+editor_options:
+  chunk_output_type: console
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  bookdown::html_document2:
+    code_folding: show
+    toc: yes
+    toc_float:
+      collapsed: no
+params:
+  dataset: 1
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      results = "hold",
+                      message = FALSE,
+                      warning = FALSE)
+```
+
+## Variant analysis in circRNA forming exons
+
+## Load packages
+
+```{r}
+library("biomaRt")
+library("dplyr")
+library("car")
+library("plotrix")
+library("rstatix")
+library("BSDA")
+library("data.table")
+library("stats")
+library("pwr")
+library("biomaRt")
+```
+
+##Subset exons for variant analysis
+```{r}
+#load data
+annotatedCirc <- read.delim("annotatedCirc.txt")
+
+#Subset only unique, annotated transcripts:
+circTranscripts <- annotatedCirc$transcript
+circTranscripts <- na.omit(circTranscripts)
+circTranscripts <- unique(circTranscripts)
+
+#Load ensembl biomart
+ensemblGRCh37 <- useEnsembl(biomart = 'genes', dataset = 'hsapiens_gene_ensembl', version = "GRCh37")
+
+#Create dataframe of genomic regions for all circTranscript exons
+allExons <- getBM(attributes = c("ensembl_transcript_id", "exon_chrom_start", "exon_chrom_end", "chromosome_name", "strand"), filters = "ensembl_transcript_id", values = circTranscripts, mart = ensemblGRCh37)
+allExons$chrom <- paste("chr", allExons$chromosome_name, sep = "")
+allExons$chromosome_name <- NULL
+allExons$strand <- gsub("-1", "-", allExons$strand)
+allExons$strand <- gsub("1", "+", allExons$strand)
+allExons$exonPos <- paste(allExons$chrom, ":", allExons$strand, ":", allExons$exon_chrom_start, "-", allExons$exon_chrom_end, sep = "")
+allExons <- unique(allExons[,c(6,5,4,2:3)])
+
+#Extract annotations for exons in BSJs
+BSJexons_up <- annotatedCirc[,(c(7,6,10,11))]
+BSJexons_up <- BSJexons_up[which(BSJexons_up$endUpBSE != "NA"),]
+BSJexons_up1 <- subset(BSJexons_up, strand == "+")
+BSJexons_up2 <- subset(BSJexons_up, strand == "-")
+colnames(BSJexons_up1) <- c("chrom", "strand", "BSEstart", "BSEend")
+colnames(BSJexons_up2) <- c("chrom", "strand", "BSEend", "BSEstart")
+BSJexons_up <- rbind(BSJexons_up1, BSJexons_up2)
+rm(BSJexons_up1, BSJexons_up2)
+
+BSJexons_dwn <- annotatedCirc[,(c(7,6,12,13))]
+BSJexons_dwn <- BSJexons_dwn[which(BSJexons_dwn$startDownBSE != "NA"),]
+BSJexons_dwn1 <- subset(BSJexons_dwn, strand == "+")
+BSJexons_dwn2 <- subset(BSJexons_dwn, strand == "-")
+colnames(BSJexons_dwn1) <- c("chrom", "strand", "BSEstart", "BSEend")
+colnames(BSJexons_dwn2) <- c("chrom", "strand", "BSEend", "BSEstart")
+BSJexons_dwn <- rbind(BSJexons_dwn1, BSJexons_dwn2)
+rm(BSJexons_dwn1, BSJexons_dwn2)
+
+BSJexons <- rbind(BSJexons_up, BSJexons_dwn)
+rm(BSJexons_up, BSJexons_dwn)
+BSJexons$exonPos <- paste(BSJexons$chrom, ":", BSJexons$strand, ":", BSJexons$BSEstart, "-", BSJexons$BSEend, sep = "")
+BSJexons <- unique(BSJexons)
+
+
+
+########
+#Subset all exons within a circRNA and nonCircExons
+########
+
+#Create bed file containing circRNA up-stream and downstream regions: 
+circBed1 <- annotatedCirc[which(annotatedCirc$strand == "+"),]
+circBed1$score <- rep(".", length(circBed1$strand))
+circBed1 <- circBed1[ ,c(7,10,13,1,26,6)]
+colnames(circBed1) <- c("chrom", "start", "end", "name", "score", "strand")
+
+circBed2 <- annotatedCirc[which(annotatedCirc$strand == "-"),]
+circBed2$score <- rep(".", length(circBed2$strand))
+circBed2 <- circBed2[ ,c(7,13,10,1,26,6)]
+colnames(circBed2) <- c("chrom", "start", "end", "name", "score", "strand")
+
+circBed <- rbind(circBed1, circBed2)
+rm(circBed1, circBed2)
+
+write.table(circBed, "circ.bed", sep = "\t", row.names = FALSE, quote = FALSE, col.names = FALSE)
+
+
+
+#Create allExon bed file to be intersected with circ.bed to find all within these regions: 
+allExons$score <- rep(".", length(allExons$chrom))
+exonBed <- allExons[ ,c(2,4,5,1,6,3)]
+
+write.table(exonBed, "exons.bed", sep = "\t", row.names = FALSE, quote = FALSE, col.names = FALSE)
+```
+
+```{bash}
+##Sort and intersect exons with circRNA positions using bedtools (in bash):
+bedtools sort -i circ.bed > circSort.bed
+bedtools sort -i exons.bed > exonsSort.bed
+bedtools intersect -wo -a circSort.bed -b exonsSort.bed > circExonIntersect.bed
+```
+
+```{R}
+rm(circBed, exonBed)
+#Import results:
+circExons <- read.delim("circExonIntersect.bed", header=FALSE)
+circExons <- circExons[,c(7:12)]
+circExons <- unique(circExons)
+colnames(circExons) <- c("chrom", "start", "end", "exonPos", "score", "strand")
+
+nonCircExons <- subset(allExons, !exonPos %in% circExons$exonPos)
+nonCircExons <- nonCircExons[,c(2:5,1)]
+
+write.table(circExons, "circExons.bed", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t")
+write.table(nonCircExons, "nonCircExons.bed", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t")
+
+
+BSJexons$score <- rep(".", length(BSJexons$strand))
+BSJexons <- BSJexons[,c(1,3:5,6,2)]
+
+nonBSJexons <- subset(circExons, !exonPos %in% BSJexons$exonPos)
+
+write.table(BSJexons, "BSJexons.bed", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t")
+write.table(nonBSJexons, "nonBSJexons.bed", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t")
+
+```
+
+```{bash}
+#Run bedtools intersect to find GnomAD variants overlapping exons
+#Requires 'gnomadBed' file with GnomAD data files for each chromosome 
+
+#For BSJ exons
+for i in {1..22}; do bedtools intersect \
+-sorted \
+-a BSJexons.bed \
+-b gnomadBed/gnomad.exomes_chr${i}_all.bed  \
+-wo \
+> BSJexons_chr${i}.txt ; done
+
+for i in {X,Y}; do bedtools intersect \
+-sorted \
+-a BSJexons.bed \
+-b gnomadBed/gnomad.exomes_chr${i}_all.bed  \
+-wo \
+> BSJexons_chr${i}.txt ; done
+
+#merge output to single file
+cat BSJexons_chr*.txt > BSJexons.txt
+
+#Repeat for nonBSJ/circ and nonCirc exon bed files
+
+```
+
+
+
+##Analysis of Exon variants:GnomAD
+```{r}
+#Load data:
+BSJexon_gnomadVariants <- read.delim("BSJexons.txt", header=FALSE)
+nonBSJexon_gnomadVariants <- read.delim("nonBSJexons.txt", header=FALSE)
+circExon_gnomadVariants <- read.delim("circExons.txt", header=FALSE)
+nonCircExon_gnomadVariants <- read.delim("nonCircExons.txt", header=FALSE)
+
+
+#Subset relevant info:
+BSJexon_gnomadVariants <- BSJexon_gnomadVariants[,c(4,6:10,12:15)]
+nonBSJexon_gnomadVariants <- nonBSJexon_gnomadVariants[,c(4,6:10,12:15)]
+circExon_gnomadVariants <- circExon_gnomadVariants[,c(4,6:10,12:15)]
+nonCircExon_gnomadVariants <- nonCircExon_gnomadVariants[,c(4,6:10,12:15)]
+
+
+colnames(BSJexon_gnomadVariants) = c("exonPos", "strand", "chr", "start", "end", "snpId", "ref", "alt", "filter", "alleFreq")
+colnames(nonBSJexon_gnomadVariants) = c("exonPos", "strand", "chr", "start", "end", "snpId", "ref", "alt", "filter", "alleFreq")
+colnames(circExon_gnomadVariants) = c("exonPos", "strand", "chr", "start", "end", "snpId", "ref", "alt", "filter", "alleFreq")
+colnames(nonCircExon_gnomadVariants) = c("exonPos", "strand", "chr", "start", "end", "snpId", "ref", "alt", "filter", "alleFreq")
+
+
+#Remove variants with filter values other than 'PASS':
+BSJexon_gnomadVariants <- BSJexon_gnomadVariants[which(BSJexon_gnomadVariants$filter == "PASS"),]
+nonBSJexon_gnomadVariants <- nonBSJexon_gnomadVariants[which(nonBSJexon_gnomadVariants$filter == "PASS"),]
+circExon_gnomadVariants <- circExon_gnomadVariants[which(circExon_gnomadVariants$filter == "PASS"),]
+nonCircExon_gnomadVariants <- nonCircExon_gnomadVariants[which(nonCircExon_gnomadVariants$filter == "PASS"),]
+
+
+
+#Calculate Exon lengths - BSJexons
+BSJexon_gnomadVariants$exonPos <- paste0("chr", BSJexon_gnomadVariants$exonPos)
+BSJexon_gnomadVariants$exonStart <- with(allExons, exon_chrom_start[match(BSJexon_gnomadVariants$exonPos, exonPos)])
+BSJexon_gnomadVariants$exonEnd <- with(allExons, exon_chrom_end[match(BSJexon_gnomadVariants$exonPos, exonPos)])
+BSJexon_gnomadVariants$exonLength <- BSJexon_gnomadVariants$exonEnd - BSJexon_gnomadVariants$exonStart
+BSJexon_gnomadVariants <- BSJexon_gnomadVariants[which(BSJexon_gnomadVariants$exonLength != 0),]
+
+#Calculate Exon lengths - nonBSJexons
+nonBSJexon_gnomadVariants$exonPos <- paste0("chr", nonBSJexon_gnomadVariants$exonPos)
+nonBSJexon_gnomadVariants$exonStart <- with(allExons, exon_chrom_start[match(nonBSJexon_gnomadVariants$exonPos, exonPos)])
+nonBSJexon_gnomadVariants$exonEnd <- with(allExons, exon_chrom_end[match(nonBSJexon_gnomadVariants$exonPos, exonPos)])
+nonBSJexon_gnomadVariants$exonLength <- nonBSJexon_gnomadVariants$exonEnd - nonBSJexon_gnomadVariants$exonStart
+nonBSJexon_gnomadVariants <- nonBSJexon_gnomadVariants[which(nonBSJexon_gnomadVariants$exonLength != 0),]
+
+#Calculate Exon lengths - circExons
+circExon_gnomadVariants$exonPos <- paste0("chr", circExon_gnomadVariants$exonPos)
+circExon_gnomadVariants$exonStart <- with(allExons, exon_chrom_start[match(circExon_gnomadVariants$exonPos, exonPos)])
+circExon_gnomadVariants$exonEnd <- with(allExons, exon_chrom_end[match(circExon_gnomadVariants$exonPos, exonPos)])
+circExon_gnomadVariants$exonLength <- circExon_gnomadVariants$exonEnd - circExon_gnomadVariants$exonStart
+circExon_gnomadVariants <- circExon_gnomadVariants[which(circExon_gnomadVariants$exonLength != 0),]
+
+#Calculate Exon lengths - nonCircExons
+nonCircExon_gnomadVariants$exonPos <- paste0("chr", nonCircExon_gnomadVariants$exonPos)
+nonCircExon_gnomadVariants$exonStart <- with(allExons, exon_chrom_start[match(nonCircExon_gnomadVariants$exonPos, exonPos)])
+nonCircExon_gnomadVariants$exonEnd <- with(allExons, exon_chrom_end[match(nonCircExon_gnomadVariants$exonPos, exonPos)])
+nonCircExon_gnomadVariants$exonLength <- nonCircExon_gnomadVariants$exonEnd - nonCircExon_gnomadVariants$exonStart
+nonCircExon_gnomadVariants <- nonCircExon_gnomadVariants[which(nonCircExon_gnomadVariants$exonLength != 0),]
+
+
+#group by exon
+BSJexon_gnomadVariants <- BSJexon_gnomadVariants %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+BSJ_gnomadExonCounts <- BSJexon_gnomadVariants[,c(1,11:14)]
+BSJ_gnomadExonCounts <- unique(BSJ_gnomadExonCounts)
+#Add exons with no variants detected
+BSJ_noGnomad <- subset(BSJexons, !exonPos %in% BSJ_gnomadExonCounts$exonPos)
+BSJ_noGnomad <- BSJ_noGnomad[,c(4,2:3)]
+colnames(BSJ_noGnomad) <- c("exonPos", "exonStart", "exonEnd")
+BSJ_noGnomad$exonLength <- BSJ_noGnomad$exonEnd - BSJ_noGnomad$exonStart
+BSJ_noGnomad$exonVariantCounts <- rep(0, length(BSJ_noGnomad$exonPos))
+#merge and calculate vars/kb 
+BSJ_gnomadExonCounts <- rbind(BSJ_gnomadExonCounts, BSJ_noGnomad)
+rm(BSJ_noGnomad)
+BSJ_gnomadExonCounts$varsKb <- BSJ_gnomadExonCounts$exonVariantCounts/(BSJ_gnomadExonCounts$exonLength/1000)
+
+#Repeat for nonBSJ exons
+#group by exon
+nonBSJexon_gnomadVariants <- nonBSJexon_gnomadVariants %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+nonBSJ_gnomadExonCounts <- nonBSJexon_gnomadVariants[,c(1,11:14)]
+nonBSJ_gnomadExonCounts <- unique(nonBSJ_gnomadExonCounts)
+#Add exons with no variants detected
+nonBSJ_noGnomad <- subset(nonBSJexons, !exonPos %in% nonBSJ_gnomadExonCounts$exonPos)
+nonBSJ_noGnomad <- nonBSJ_noGnomad[,c(4,2:3)]
+colnames(nonBSJ_noGnomad) <- c("exonPos", "exonStart", "exonEnd")
+nonBSJ_noGnomad$exonLength <- nonBSJ_noGnomad$exonEnd - nonBSJ_noGnomad$exonStart
+nonBSJ_noGnomad <- nonBSJ_noGnomad[which(nonBSJ_noGnomad$exonLength > 0),]
+nonBSJ_noGnomad$exonVariantCounts <- rep(0, length(nonBSJ_noGnomad$exonPos))
+#merge and calculate vars/kb 
+nonBSJ_gnomadExonCounts <- rbind(nonBSJ_gnomadExonCounts, nonBSJ_noGnomad)
+rm(nonBSJ_noGnomad)
+nonBSJ_gnomadExonCounts$varsKb <- nonBSJ_gnomadExonCounts$exonVariantCounts/(nonBSJ_gnomadExonCounts$exonLength/1000)
+
+#Repeat for circExons
+#group by exon
+circExon_gnomadVariants <- circExon_gnomadVariants %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+circ_gnomadExonCounts <- circExon_gnomadVariants[,c(1,11:14)]
+circ_gnomadExonCounts <- unique(circ_gnomadExonCounts)
+#Add exons with no variants detected
+circ_noGnomad <- subset(circExons, !exonPos %in% circ_gnomadExonCounts$exonPos)
+circ_noGnomad <- circ_noGnomad[,c(4,2:3)]
+colnames(circ_noGnomad) <- c("exonPos", "exonStart", "exonEnd")
+circ_noGnomad$exonLength <- circ_noGnomad$exonEnd - circ_noGnomad$exonStart
+circ_noGnomad <- circ_noGnomad[which(circ_noGnomad$exonLength > 0),]
+circ_noGnomad$exonVariantCounts <- rep(0, length(circ_noGnomad$exonPos))
+#merge and calculate vars/kb 
+circ_gnomadExonCounts <- rbind(circ_gnomadExonCounts, circ_noGnomad)
+rm(circ_noGnomad)
+circ_gnomadExonCounts$varsKb <- circ_gnomadExonCounts$exonVariantCounts/(circ_gnomadExonCounts$exonLength/1000)
+
+#Repeat for nonCirc Exons
+#group by exon
+nonCircExon_gnomadVariants <- nonCircExon_gnomadVariants %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+nonCirc_gnomadExonCounts <- nonCircExon_gnomadVariants[,c(1,11:14)]
+nonCirc_gnomadExonCounts <- unique(nonCirc_gnomadExonCounts)
+#Add exons with no variants detected
+nonCirc_noGnomad <- subset(nonCircExons, !exonPos %in% nonCirc_gnomadExonCounts$exonPos)
+nonCirc_noGnomad <- nonCirc_noGnomad[,c(5,3:4)]
+colnames(nonCirc_noGnomad) <- c("exonPos", "exonStart", "exonEnd")
+nonCirc_noGnomad$exonLength <- nonCirc_noGnomad$exonEnd - nonCirc_noGnomad$exonStart
+nonCirc_noGnomad <- nonCirc_noGnomad[which(nonCirc_noGnomad$exonLength > 0),]
+nonCirc_noGnomad$exonVariantCounts <- rep(0, length(nonCirc_noGnomad$exonPos))
+#merge and calculate vars/kb 
+nonCirc_gnomadExonCounts <- rbind(nonCirc_gnomadExonCounts, nonCirc_noGnomad)
+rm(nonCirc_noGnomad)
+nonCirc_gnomadExonCounts$varsKb <- nonCirc_gnomadExonCounts$exonVariantCounts/(nonCirc_gnomadExonCounts$exonLength/1000)
+
+#Caluculate mean and standard error:
+mean(BSJ_gnomadExonCounts$varsKb)
+std.error(BSJ_gnomadExonCounts$varsKb)
+
+mean(nonBSJ_gnomadExonCounts$varsKb)
+std.error(nonBSJ_gnomadExonCounts$varsKb)
+
+mean(circ_gnomadExonCounts$varsKb)
+std.error(circ_gnomadExonCounts$varsKb)
+
+mean(nonCirc_gnomadExonCounts$varsKb)
+std.error(nonCirc_gnomadExonCounts$varsKb)
+
+#Test differences in Exon variant count/kb between BSJ/nonBSJ and circ/nonCirc exons.
+
+BSJ_nonBSJ_gnomad <- rbind(BSJ_gnomadExonCounts, nonBSJ_gnomadExonCounts)
+BSJ_nonBSJ_gnomad$group <- c(rep("BSJ", length(BSJ_gnomadExonCounts$varsKb)), rep("nonBSJ", length(nonBSJ_gnomadExonCounts$varsKb)))
+BSJ_nonBSJ_gnomad <- BSJ_nonBSJ_gnomad[,c(7,6)]
+
+z.test(x=BSJ_gnomadExonCounts$varsKb, sigma.x=sd(BSJ_gnomadExonCounts$varsKb), y=nonBSJ_gnomadExonCounts$varsKb, sigma.y=sd(nonBSJ_gnomadExonCounts$varsKb))
+
+circ_nonCirc_gnomad <- rbind(circ_gnomadExonCounts, nonCirc_gnomadExonCounts)
+circ_nonCirc_gnomad$group <- c(rep("circ", length(circ_gnomadExonCounts$varsKb)), rep("nonCirc", length(nonCirc_gnomadExonCounts$varsKb)))
+circ_nonCirc_gnomad <- circ_nonCirc_gnomad[,c(7,6)]
+
+z.test(x=circ_gnomadExonCounts$varsKb, sigma.x=sd(circ_gnomadExonCounts$varsKb), y=nonCirc_gnomadExonCounts$varsKb, sigma.y=sd(nonCirc_gnomadExonCounts$varsKb))
+
+```
+
+
+##Annoate Gnomad Variants
+```{r}
+
+#Create vcf files to run ensemble variant effect predictor
+BSJexon_Vcf <- BSJexon_gnomadVariants[,1:12]
+BSJexon_Vcf$qual <- rep(".", length(BSJexon_Vcf$exonPos))
+BSJexon_Vcf$info <- rep(".", length(BSJexon_Vcf$exonPos))
+BSJexon_Vcf <- BSJexon_Vcf[,c(3,4,6:8,13,9,14)]
+BSJexon_Vcf <- BSJexon_Vcf[order(BSJexon_Vcf$start),]
+BSJexon_Vcf <- BSJexon_Vcf[order(BSJexon_Vcf$chr),]
+write.table(BSJexon_Vcf, file = "BSJ_gnomad.vcf", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+
+nonBSJexon_Vcf <- nonBSJexon_gnomadVariants[,1:12]
+nonBSJexon_Vcf$qual <- rep(".", length(nonBSJexon_Vcf$exonPos))
+nonBSJexon_Vcf$info <- rep(".", length(nonBSJexon_Vcf$exonPos))
+nonBSJexon_Vcf <- nonBSJexon_Vcf[,c(3,4,6:8,13,9,14)]
+nonBSJexon_Vcf <- nonBSJexon_Vcf[order(nonBSJexon_Vcf$start),]
+nonBSJexon_Vcf <- nonBSJexon_Vcf[order(nonBSJexon_Vcf$chr),]
+write.table(nonBSJexon_Vcf, file = "nonBSJ_gnomad.vcf", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+
+circExon_Vcf <- circExon_gnomadVariants[,1:12]
+circExon_Vcf$qual <- rep(".", length(circExon_Vcf$exonPos))
+circExon_Vcf$info <- rep(".", length(circExon_Vcf$exonPos))
+circExon_Vcf <- circExon_Vcf[,c(3,4,6:8,13,9,14)]
+circExon_Vcf <- circExon_Vcf[order(circExon_Vcf$start),]
+circExon_Vcf <- circExon_Vcf[order(circExon_Vcf$chr),]
+write.table(circExon_Vcf, file = "circ_gnomad.vcf", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+
+nonCircExon_Vcf <- nonCircExon_gnomadVariants[,1:12]
+nonCircExon_Vcf$qual <- rep(".", length(nonCircExon_Vcf$exonPos))
+nonCircExon_Vcf$info <- rep(".", length(nonCircExon_Vcf$exonPos))
+nonCircExon_Vcf <- nonCircExon_Vcf[,c(3,4,6:8,13,9,14)]
+nonCircExon_Vcf <- nonCircExon_Vcf[order(nonCircExon_Vcf$start),]
+nonCircExon_Vcf <- nonCircExon_Vcf[order(nonCircExon_Vcf$chr),]
+write.table(nonCircExon_Vcf, file = "nonCirc_gnomad.vcf", quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+rm(BSJexon_Vcf, nonBSJexon_Vcf, circExon_Vcf, nonCircExon_Vcf)
+```
+
+## Annotate GnomAD variants
+```{bash}
+# Run from terminal:
+cd ensembl_vep/
+./vep --cache --assembly GRCh37 --sift b -i BSJ_gnomad.vcf -o BSJexons_vepOut.txt --stats_file BSJexons_vepOut.html
+./vep --cache --assembly GRCh37 --sift b -i nonBSJ_gnomad.vcf -o nonBSJexons_vepOut.txt --stats_file nonBSJexons_vepOut.html
+./vep --cache --assembly GRCh37 --sift b -i circ_gnomad.vcf -o circExons_vepOut.txt --stats_file circExons_vepOut.html
+./vep --cache --assembly GRCh37 --sift b -i nonCirc_gnomad.vcf -o nonCircExons_vepOut.txt --stats_file nonCircExons_vepOut.html
+
+```
+
+
+##Compare BSJ/nonBSJ
+```{r}
+#Load data:
+BSJexon_gnomadVep <- read.table("BSJexons_VepOut.txt", quote="\"")
+nonBSJexon_gnomadVep <- read.table("nonBSJexons_VepOut.txt", quote="\"")
+
+colnames(BSJexon_gnomadVep) <- c("Uploaded_variation", "Location", "Allele", "Gene", "Feature", "Feature_type", "Consequence", "cDNA_position", "CDS_position", "Protein_position", "Amino_acids", "Codons", "Existing_variation", "Extra")
+colnames(nonBSJexon_gnomadVep) <- c("Uploaded_variation", "Location", "Allele", "Gene", "Feature", "Feature_type", "Consequence", "cDNA_position", "CDS_position", "Protein_position", "Amino_acids", "Codons", "Existing_variation", "Extra")
+
+#Filter missense and snynonymous variants 
+BSJexon_MS <- BSJexon_gnomadVep[BSJexon_gnomadVep$Consequence %like% "missense",]
+BSJexon_SYN <- BSJexon_gnomadVep[BSJexon_gnomadVep$Consequence %like% "synonymous",]
+
+nonBSJexon_MS <- nonBSJexon_gnomadVep[nonBSJexon_gnomadVep$Consequence %like% "missense",]
+nonBSJexon_SYN <- nonBSJexon_gnomadVep[nonBSJexon_gnomadVep$Consequence %like% "synonymous",]
+
+#Remove low confidence SIFT calls and filter tolerated and deleterious SIFT missense calls
+BSJexon_SIFT <- BSJexon_MS[!BSJexon_MS$Extra %like% "low_confidence",]
+BSJexon_SIFTd <- BSJexon_SIFT[BSJexon_SIFT$Extra %like% "SIFT=deleterious",]
+
+nonBSJexon_SIFT <- nonBSJexon_MS[!nonBSJexon_MS$Extra %like% "low_confidence",]
+nonBSJexon_SIFTd <- nonBSJexon_SIFT[nonBSJexon_SIFT$Extra %like% "SIFT=deleterious",]
+
+
+BSJexon_HIGH <- BSJexon_gnomadVep[BSJexon_gnomadVep$Extra %like% "IMPACT=HIGH",]
+BSJexon_MOD <- BSJexon_gnomadVep[BSJexon_gnomadVep$Extra %like% "IMPACT=MODERATE",]
+BSJexon_LOW <- BSJexon_gnomadVep[BSJexon_gnomadVep$Extra %like% "IMPACT=LOW",]
+
+
+nonBSJexon_HIGH <- nonBSJexon_gnomadVep[nonBSJexon_gnomadVep$Extra %like% "IMPACT=HIGH",]
+nonBSJexon_MOD <- nonBSJexon_gnomadVep[nonBSJexon_gnomadVep$Extra %like% "IMPACT=MODERATE",]
+nonBSJexon_LOW <- nonBSJexon_gnomadVep[nonBSJexon_gnomadVep$Extra %like% "IMPACT=LOW",]
+
+
+#Filter variants by splicing effect
+BSJexon_spliceV <- BSJexon_gnomadVep[BSJexon_gnomadVep$Consequence %like% "splice",]
+nonBSJexon_spliceV <- nonBSJexon_gnomadVep[nonBSJexon_gnomadVep$Consequence %like% "splice",]
+
+BSJ_spliceVars <- BSJexon_gnomadVariants[which(BSJexon_gnomadVariants$snpId %in% BSJexon_spliceV$Uploaded_variation),]
+BSJ_spliceVars <- BSJ_spliceVars %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+BSJ_spliceVars <- BSJ_spliceVars[,c(1,11:14)]
+BSJ_spliceVars <- unique(BSJ_spliceVars)
+#Add exons with no variants detected
+BSJ_noSplice <- subset(BSJexons, !exonPos %in% BSJ_spliceVars$exonPos)
+BSJ_noSplice <- BSJ_noSplice[,c(4,2:3)]
+colnames(BSJ_noSplice) <- c("exonPos", "exonStart", "exonEnd")
+BSJ_noSplice$exonLength <- BSJ_noSplice$exonEnd - BSJ_noSplice$exonStart
+BSJ_noSplice$exonVariantCounts <- rep(0, length(BSJ_noSplice$exonPos))
+#merge and calculate vars/kb 
+BSJ_spliceVarCounts <- rbind(BSJ_spliceVars, BSJ_noSplice)
+rm(BSJexon_spliceV, BSJ_spliceVars, BSJ_noSplice)
+BSJ_spliceVarCounts$varsKb <- BSJ_spliceVarCounts$exonVariantCounts/(BSJ_spliceVarCounts$exonLength/1000)
+
+
+nonBSJ_spliceVars <- nonBSJexon_gnomadVariants[which(nonBSJexon_gnomadVariants$snpId %in% nonBSJexon_spliceV$Uploaded_variation),]
+nonBSJ_spliceVars <- nonBSJ_spliceVars %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+nonBSJ_spliceVars <- nonBSJ_spliceVars[,c(1,11:14)]
+nonBSJ_spliceVars <- unique(nonBSJ_spliceVars)
+#Add exons with no variants detected
+nonBSJ_noSplice <- subset(nonBSJexons, !exonPos %in% nonBSJ_spliceVars$exonPos)
+nonBSJ_noSplice <- nonBSJ_noSplice[,c(4,2:3)]
+colnames(nonBSJ_noSplice) <- c("exonPos", "exonStart", "exonEnd")
+nonBSJ_noSplice$exonLength <- nonBSJ_noSplice$exonEnd - nonBSJ_noSplice$exonStart
+nonBSJ_noSplice <- nonBSJ_noSplice[which(nonBSJ_noSplice$exonLength >0),]
+nonBSJ_noSplice$exonVariantCounts <- rep(0, length(nonBSJ_noSplice$exonPos))
+#merge and calculate vars/kb 
+nonBSJ_spliceVarCounts <- rbind(nonBSJ_spliceVars, nonBSJ_noSplice)
+rm(nonBSJ_spliceVars, nonBSJ_noSplice)
+nonBSJ_spliceVarCounts$varsKb <- nonBSJ_spliceVarCounts$exonVariantCounts/(nonBSJ_spliceVarCounts$exonLength/1000)
+
+
+mean(BSJ_spliceVarCounts$varsKb)
+std.error(BSJ_spliceVarCounts$varsKb)
+
+mean(nonBSJ_spliceVarCounts$varsKb)
+std.error(nonBSJ_spliceVarCounts$varsKb)
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = BSJ_nonBSJ_SpliceV)
+
+#Test difference between groups
+wilcox.test(x=BSJ_spliceVarCounts$varsKb, sigma.x=sd(BSJ_spliceVarCounts$varsKb), y=nonBSJ_spliceVarCounts$varsKb, sigma.y=sd(nonBSJ_spliceVarCounts$varsKb))
+
+
+rm(BSJ_spliceVarCounts, nonBSJ_spliceVarCounts)
+rm(BSJexon_gnomadVariants, BSJ_gnomadExonCounts, BSJexonVep, nonBSJexon_gnomadVariants, nonBSJ_gnomadExonCounts, nonBSJexonVep)
+rm(BSJexon_gnomadVep, nonBSJexon_gnomadVep)
+
+#Compare circ/nonCirc
+#Load data:
+circExonVep <- read.table("circExons_VepOut.txt", quote="\"")
+nonCircExonVep <- read.table("nonCircExons_VepOut.txt", quote="\"")
+
+colnames(circExonVep) <- c("Uploaded_variation", "Location", "Allele", "Gene", "Feature", "Feature_type", "Consequence", "cDNA_position", "CDS_position", "Protein_position", "Amino_acids", "Codons", "Existing_variation", "Extra")
+colnames(nonCircExonVep) <- c("Uploaded_variation", "Location", "Allele", "Gene", "Feature", "Feature_type", "Consequence", "cDNA_position", "CDS_position", "Protein_position", "Amino_acids", "Codons", "Existing_variation", "Extra")
+
+#Filter missense and snynonymous variants 
+circExon_MS <- circExonVep[circExonVep$Consequence %like% "missense",]
+circExon_SYN <- circExonVep[circExonVep$Consequence %like% "synonymous",]
+
+nonCircExon_MS <- nonCircExonVep[nonCircExonVep$Consequence %like% "missense",]
+nonCircExon_SYN <- nonCircExonVep[nonCircExonVep$Consequence %like% "synonymous",]
+
+#Calculate Z-test of difference in proportions
+prop.test(x = c(length(circExon_MS$Feature), length(nonCircExon_MS$Feature)), n = c(length(circExon_MS$Feature)+length(circExon_SYN$Feature), length(nonCircExon_MS$Feature)+length(nonCircExon_SYN$Feature)))
+
+#Remove low confidence SIFT calls and filter deleterious SIFT missense calls
+circExon_SIFT <- circExon_MS[!circExon_MS$Extra %like% "low_confidence",]
+circExon_SIFTd <- circExon_SIFT[circExon_SIFT$Extra %like% "SIFT=deleterious",]
+
+nonCircExon_SIFT <- nonCircExon_MS[!nonCircExon_MS$Extra %like% "low_confidence",]
+nonCircExon_SIFTd <- nonCircExon_SIFT[nonCircExon_SIFT$Extra %like% "SIFT=deleterious",]
+
+#Calculate Z-test of difference in proportions
+prop.test(x = c(length(circExon_SIFTd$Feature), length(nonCircExon_SIFTd$Feature)), n = c(length(circExon_SIFT$Feature), length(nonCircExon_SIFT$Feature)))
+
+
+#Filter variants by impact
+circExon_HIGH <- circExonVep[circExonVep$Extra %like% "IMPACT=HIGH",]
+circExon_MOD <- circExonVep[circExonVep$Extra %like% "IMPACT=MODERATE",]
+circExon_LOW <- circExonVep[circExonVep$Extra %like% "IMPACT=LOW",]
+
+
+nonCircExon_HIGH <- nonCircExonVep[nonCircExonVep$Extra %like% "IMPACT=HIGH",]
+nonCircExon_MOD <- nonCircExonVep[nonCircExonVep$Extra %like% "IMPACT=MODERATE",]
+nonCircExon_LOW <- nonCircExonVep[nonCircExonVep$Extra %like% "IMPACT=LOW",]
+
+
+#Calculate Z-test of difference in proportions
+prop.test(x = c(length(circExon_HIGH$Feature), length(nonCircExon_HIGH$Feature)), n = c((length(circExon_HIGH$Feature)+length(circExon_MOD$Feature)+length(circExon_LOW$Feature)),( length(nonCircExon_HIGH$Feature)+length(nonCircExon_MOD$Feature)+length(nonCircExon_LOW$Feature))))
+
+prop.test(x = c(length(circExon_MOD$Feature), length(nonCircExon_MOD$Feature)), n = c((length(circExon_HIGH$Feature)+length(circExon_MOD$Feature)+length(circExon_LOW$Feature)),( length(nonCircExon_HIGH$Feature)+length(nonCircExon_MOD$Feature)+length(nonCircExon_LOW$Feature))))
+
+prop.test(x = c(length(circExon_LOW$Feature), length(nonCircExon_LOW$Feature)), n = c((length(circExon_HIGH$Feature)+length(circExon_MOD$Feature)+length(circExon_LOW$Feature)),( length(nonCircExon_HIGH$Feature)+length(nonCircExon_MOD$Feature)+length(nonCircExon_LOW$Feature))))
+          
+
+#Filter variants by splicing effect
+circExon_spliceV <- circExonVep[circExonVep$Consequence %like% "splice",]
+nonCircExon_spliceV <- nonCircExonVep[nonCircExonVep$Consequence %like% "splice",]
+
+circ_spliceVars <- circExon_gnomadVariants[which(circExon_gnomadVariants$snpId %in% circExon_spliceV$Uploaded_variation),]
+circ_spliceVars <- circ_spliceVars %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+circ_spliceVars <- circ_spliceVars[,c(1,11:14)]
+circ_spliceVars <- unique(circ_spliceVars)
+#Add exons with no variants detected
+circ_noSplice <- subset(circExons, !exonPos %in% circ_spliceVars$exonPos)
+circ_noSplice <- circ_noSplice[,c(4,2:3)]
+colnames(circ_noSplice) <- c("exonPos", "exonStart", "exonEnd")
+circ_noSplice$exonLength <- circ_noSplice$exonEnd - circ_noSplice$exonStart
+circ_noSplice$exonVariantCounts <- rep(0, length(circ_noSplice$exonPos))
+#merge and calculate vars/kb 
+circ_spliceVarCounts <- rbind(circ_spliceVars, circ_noSplice)
+rm(circ_spliceVars, circ_noSplice, circExon_spliceV)
+circ_spliceVarCounts <- circ_spliceVarCounts[which(circ_spliceVarCounts$exonLength >0),]
+circ_spliceVarCounts$varsKb <- circ_spliceVarCounts$exonVariantCounts/(circ_spliceVarCounts$exonLength/1000)
+
+
+nonCirc_spliceVars <- nonCircExon_gnomadVariants[which(nonCircExon_gnomadVariants$snpId %in% nonCircExon_spliceV$Uploaded_variation),]
+nonCirc_spliceVars <- nonCirc_spliceVars %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+nonCirc_spliceVars <- nonCirc_spliceVars[,c(1,11:14)]
+nonCirc_spliceVars <- unique(nonCirc_spliceVars)
+#Add exons with no variants detected
+nonCirc_noSplice <- subset(nonCircExons, !exonPos %in% nonCirc_spliceVars$exonPos)
+nonCirc_noSplice <- nonCirc_noSplice[,c(5,3:4)]
+colnames(nonCirc_noSplice) <- c("exonPos", "exonStart", "exonEnd")
+nonCirc_noSplice$exonLength <- nonCirc_noSplice$exonEnd - nonCirc_noSplice$exonStart
+nonCirc_noSplice <- nonCirc_noSplice[which(nonCirc_noSplice$exonLength >0),]
+nonCirc_noSplice$exonVariantCounts <- rep(0, length(nonCirc_noSplice$exonPos))
+#merge and calculate vars/kb 
+nonCirc_spliceVarCounts <- rbind(nonCirc_spliceVars, nonCirc_noSplice)
+rm(nonCirc_spliceVars, nonCirc_noSplice, nonCircExon_spliceV)
+nonCirc_spliceVarCounts$varsKb <- nonCirc_spliceVarCounts$exonVariantCounts/(nonCirc_spliceVarCounts$exonLength/1000)
+
+
+mean(circ_spliceVarCounts$varsKb)
+std.error(circ_spliceVarCounts$varsKb)
+
+mean(nonCirc_spliceVarCounts$varsKb)
+std.error(nonCirc_spliceVarCounts$varsKb)
+
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = circ_nonCirc_SpliceV)
+
+#Test difference between groups
+wilcox.test(x=circ_spliceVarCounts$varsKb, sigma.x=sd(circ_spliceVarCounts$varsKb), y=nonCirc_spliceVarCounts$varsKb, sigma.y=sd(nonCirc_spliceVarCounts$varsKb))
+
+circ_nonCirc_SpliceV %>% cohens_d(varsKb ~ group)
+
+rm(circ_spliceVarCounts, nonCirc_spliceVarCounts)
+rm(circExon_gnomadVariants, circ_gnomadExonCounts, circExonVep, nonCircExon_gnomadVariants, nonCirc_gnomadExonCounts, nonCircExonVep)
+
+```
+
+
+##Analysis of Exon Variants: ASD cases (Satterstrom)
+```{r}
+
+BSJexons_affected.bed <- read.table("BSJexons_affected.bed", quote="\"")
+colnames(BSJexons_affected.bed) <- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes", "dnvScore", "dnvStrand")
+BSJexons_ASDdnvs <- BSJexons_affected.bed
+BSJexons_ASDdnvs$exonLength <- BSJexons_ASDdnvs$exonEnd - BSJexons_ASDdnvs$exonStart
+BSJexons_ASDdnvs <- BSJexons_ASDdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+BSJ_ASDdnvs_exonCounts <- BSJexons_ASDdnvs[,c(4,2,3,13,14)]
+BSJ_ASDdnvs_exonCounts <- unique(BSJ_ASDdnvs_exonCounts)
+#Add exons with no variants detected
+BSJ_noASD <- subset(BSJexons, !exonPos %in% BSJ_ASDdnvs_exonCounts$exonPos)
+BSJ_noASD <- BSJ_noASD[,c(4,2:3)]
+colnames(BSJ_noASD) <- c("exonPos", "exonStart", "exonEnd")
+BSJ_noASD$exonLength <- BSJ_noASD$exonEnd - BSJ_noASD$exonStart
+BSJ_noASD$exonVariantCounts <- rep(0, length(BSJ_noASD$exonPos))
+BSJ_noASD <- unique(BSJ_noASD)
+#merge and calculate vars/kb 
+BSJ_ASDdnvs_exonCounts <- rbind(BSJ_ASDdnvs_exonCounts, BSJ_noASD)
+rm(BSJ_noASD)
+BSJ_ASDdnvs_exonCounts$varsKb <- BSJ_ASDdnvs_exonCounts$exonVariantCounts/(BSJ_ASDdnvs_exonCounts$exonLength/1000)
+mean(BSJ_ASDdnvs_exonCounts$varsKb)
+std.error(BSJ_ASDdnvs_exonCounts$varsKb)
+
+nonBSJexons_affected.bed <- read.table("nonBSJexons_affected.bed", quote="\"")
+colnames(nonBSJexons_affected.bed) <- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes", "dnvScore", "dnvStrand")
+nonBSJexons_ASDdnvs <- nonBSJexons_affected.bed
+nonBSJexons_ASDdnvs$exonLength <- nonBSJexons_ASDdnvs$exonEnd - nonBSJexons_ASDdnvs$exonStart
+nonBSJexons_ASDdnvs <- nonBSJexons_ASDdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+nonBSJ_ASDdnvs_exonCounts <- nonBSJexons_ASDdnvs[,c(4,2,3,13,14)]
+nonBSJ_ASDdnvs_exonCounts <- unique(nonBSJ_ASDdnvs_exonCounts)
+#Add exons with no variants detected
+nonBSJ_noASD <- subset(nonBSJexons, !exonPos %in% nonBSJ_ASDdnvs_exonCounts$exonPos)
+nonBSJ_noASD <- nonBSJ_noASD[,c(4,2:3)]
+colnames(nonBSJ_noASD) <- c("exonPos", "exonStart", "exonEnd")
+nonBSJ_noASD$exonLength <- nonBSJ_noASD$exonEnd - nonBSJ_noASD$exonStart
+nonBSJ_noASD <- nonBSJ_noASD[which(nonBSJ_noASD$exonLength > 0),]
+nonBSJ_noASD$exonVariantCounts <- rep(0, length(nonBSJ_noASD$exonPos))
+#merge and calculate vars/kb 
+nonBSJ_ASDdnvs_exonCounts <- rbind(nonBSJ_ASDdnvs_exonCounts, nonBSJ_noASD)
+rm(nonBSJ_noASD)
+nonBSJ_ASDdnvs_exonCounts$varsKb <- nonBSJ_ASDdnvs_exonCounts$exonVariantCounts/(nonBSJ_ASDdnvs_exonCounts$exonLength/1000)
+mean(nonBSJ_ASDdnvs_exonCounts$varsKb)
+std.error(nonBSJ_ASDdnvs_exonCounts$varsKb)
+
+
+BSJ_nonBSJ_ASDdnvs <- rbind(BSJ_ASDdnvs_exonCounts, nonBSJ_ASDdnvs_exonCounts)
+BSJ_nonBSJ_ASDdnvs$group <- c(rep("BSJ", length(BSJ_ASDdnvs_exonCounts$varsKb)), rep("nonBSJ", length(nonBSJ_ASDdnvs_exonCounts$varsKb)))
+BSJ_nonBSJ_ASDdnvs <- BSJ_nonBSJ_ASDdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = BSJ_nonBSJ_ASDdnvs)
+#Test difference between groups
+z.test(x=BSJ_ASDdnvs_exonCounts$varsKb, sigma.x=sd(BSJ_ASDdnvs_exonCounts$varsKb), y=nonBSJ_ASDdnvs_exonCounts$varsKb, sigma.y=sd(nonBSJ_ASDdnvs_exonCounts$varsKb))
+
+
+
+
+
+circExons_affected.bed <- read.table("circExons_affected.bed", quote="\"")
+colnames(circExons_affected.bed) <- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes", "dnvScore", "dnvStrand")
+circExons_ASDdnvs <- circExons_affected.bed
+circExons_ASDdnvs$exonLength <- circExons_ASDdnvs$exonEnd - circExons_ASDdnvs$exonStart
+circExons_ASDdnvs <- circExons_ASDdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+circ_ASDdnvs_exonCounts <- circExons_ASDdnvs[,c(4,2,3,13,14)]
+circ_ASDdnvs_exonCounts <- unique(circ_ASDdnvs_exonCounts)
+#Add exons with no variants detected
+circ_noASD <- subset(circExons, !exonPos %in% circ_ASDdnvs_exonCounts$exonPos)
+circ_noASD <- circ_noASD[,c(4,2:3)]
+colnames(circ_noASD) <- c("exonPos", "exonStart", "exonEnd")
+circ_noASD$exonLength <- circ_noASD$exonEnd - circ_noASD$exonStart
+circ_noASD <- circ_noASD[which(circ_noASD$exonLength > 0),]
+circ_noASD$exonVariantCounts <- rep(0, length(circ_noASD$exonPos))
+circ_noASD <- unique(circ_noASD)
+#merge and calculate vars/kb 
+circ_ASDdnvs_exonCounts <- rbind(circ_ASDdnvs_exonCounts, circ_noASD)
+rm(circ_noASD)
+circ_ASDdnvs_exonCounts$varsKb <- circ_ASDdnvs_exonCounts$exonVariantCounts/(circ_ASDdnvs_exonCounts$exonLength/1000)
+mean(circ_ASDdnvs_exonCounts$varsKb)
+std.error(circ_ASDdnvs_exonCounts$varsKb)
+
+nonCircExons_affected.bed <- read.table("nonCircExons_affected.bed", quote="\"")
+colnames(nonCircExons_affected.bed) <- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes", "dnvScore", "dnvStrand")
+nonCircExons_ASDdnvs <- nonCircExons_affected.bed
+nonCircExons_ASDdnvs$exonLength <- nonCircExons_ASDdnvs$exonEnd - nonCircExons_ASDdnvs$exonStart
+nonCircExons_ASDdnvs <- nonCircExons_ASDdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+nonCirc_ASDdnvs_exonCounts <- nonCircExons_ASDdnvs[,c(4,2,3,13,14)]
+nonCirc_ASDdnvs_exonCounts <- unique(nonCirc_ASDdnvs_exonCounts)
+#Add exons with no variants detected
+nonCirc_noASD <- subset(nonCircExons, !exonPos %in% nonCirc_ASDdnvs_exonCounts$exonPos)
+nonCirc_noASD <- nonCirc_noASD[,c(5,3:4)]
+colnames(nonCirc_noASD) <- c("exonPos", "exonStart", "exonEnd")
+nonCirc_noASD$exonLength <- nonCirc_noASD$exonEnd - nonCirc_noASD$exonStart
+nonCirc_noASD <- nonCirc_noASD[which(nonCirc_noASD$exonLength > 0),]
+nonCirc_noASD$exonVariantCounts <- rep(0, length(nonCirc_noASD$exonPos))
+#merge and calculate vars/kb 
+nonCirc_ASDdnvs_exonCounts <- rbind(nonCirc_ASDdnvs_exonCounts, nonCirc_noASD)
+rm(nonCirc_noASD)
+nonCirc_ASDdnvs_exonCounts$varsKb <- nonCirc_ASDdnvs_exonCounts$exonVariantCounts/(nonCirc_ASDdnvs_exonCounts$exonLength/1000)
+mean(nonCirc_ASDdnvs_exonCounts$varsKb)
+std.error(nonCirc_ASDdnvs_exonCounts$varsKb)
+
+
+circ_nonCirc_ASDdnvs <- rbind(circ_ASDdnvs_exonCounts, nonCirc_ASDdnvs_exonCounts)
+circ_nonCirc_ASDdnvs$group <- c(rep("circ", length(circ_ASDdnvs_exonCounts$varsKb)), rep("nonCirc", length(nonCirc_ASDdnvs_exonCounts$varsKb)))
+circ_nonCirc_ASDdnvs <- circ_nonCirc_ASDdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = circ_nonCirc_ASDdnvs)
+#Test difference between groups
+wilcox.test(varsKb ~ group, data = circ_nonCirc_ASDdnvs)
+
+```
+
+
+##Analysis of Exon Variants: unaffected controls for ASD (Satterstrom)
+```{r}
+BSJexons_unaffected.bed <- read.table("BSJexons_unaffected.bed", quote="\"")
+colnames(BSJexons_unaffected.bed) <- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes", "dnvScore", "dnvStrand")
+BSJexons_ctrlASDdnvs <- BSJexons_unaffected.bed
+BSJexons_ctrlASDdnvs$exonLength <- BSJexons_ctrlASDdnvs$exonEnd - BSJexons_ctrlASDdnvs$exonStart
+BSJexons_ctrlASDdnvs <- BSJexons_ctrlASDdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+BSJ_ctrlASDdnvs_exonCounts <- BSJexons_ctrlASDdnvs[,c(4,2,3,13,14)]
+BSJ_ctrlASDdnvs_exonCounts <- unique(BSJ_ctrlASDdnvs_exonCounts)
+#Add exons with no variants detected
+BSJ_noCtrlASD <- subset(BSJexons, !exonPos %in% BSJ_ctrlASDdnvs_exonCounts$exonPos)
+BSJ_noCtrlASD <- BSJ_noCtrlASD[,c(4,2:3)]
+colnames(BSJ_noCtrlASD) <- c("exonPos", "exonStart", "exonEnd")
+BSJ_noCtrlASD$exonLength <- BSJ_noCtrlASD$exonEnd - BSJ_noCtrlASD$exonStart
+BSJ_noCtrlASD$exonVariantCounts <- rep(0, length(BSJ_noCtrlASD$exonPos))
+BSJ_noCtrlASD <- unique(BSJ_noCtrlASD)
+#merge and calculate vars/kb 
+BSJ_ctrlASDdnvs_exonCounts <- rbind(BSJ_ctrlASDdnvs_exonCounts, BSJ_noCtrlASD)
+rm(BSJ_noCtrlASD)
+BSJ_ctrlASDdnvs_exonCounts$varsKb <- BSJ_ctrlASDdnvs_exonCounts$exonVariantCounts/(BSJ_ctrlASDdnvs_exonCounts$exonLength/1000)
+mean(BSJ_ctrlASDdnvs_exonCounts$varsKb)
+std.error(BSJ_ctrlASDdnvs_exonCounts$varsKb)
+
+nonBSJexons_unaffected.bed <- read.table("nonBSJexons_unaffected.bed", quote="\"")
+colnames(nonBSJexons_unaffected.bed) <- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes", "dnvScore", "dnvStrand")
+nonBSJexons_ctrlASDdnvs <- nonBSJexons_unaffected.bed
+nonBSJexons_ctrlASDdnvs$exonLength <- nonBSJexons_ctrlASDdnvs$exonEnd - nonBSJexons_ctrlASDdnvs$exonStart
+nonBSJexons_ctrlASDdnvs <- nonBSJexons_ctrlASDdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+nonBSJ_ctrlASDdnvs_exonCounts <- nonBSJexons_ctrlASDdnvs[,c(4,2,3,13,14)]
+nonBSJ_ctrlASDdnvs_exonCounts <- unique(nonBSJ_ctrlASDdnvs_exonCounts)
+#Add exons with no variants detected
+nonBSJ_noCtrlASD <- subset(nonBSJexons, !exonPos %in% nonBSJ_ctrlASDdnvs_exonCounts$exonPos)
+nonBSJ_noCtrlASD <- nonBSJ_noCtrlASD[,c(4,2:3)]
+colnames(nonBSJ_noCtrlASD) <- c("exonPos", "exonStart", "exonEnd")
+nonBSJ_noCtrlASD$exonLength <- nonBSJ_noCtrlASD$exonEnd - nonBSJ_noCtrlASD$exonStart
+nonBSJ_noCtrlASD <- nonBSJ_noCtrlASD[which(nonBSJ_noCtrlASD$exonLength > 0),]
+nonBSJ_noCtrlASD$exonVariantCounts <- rep(0, length(nonBSJ_noCtrlASD$exonPos))
+#merge and calculate vars/kb 
+nonBSJ_ctrlASDdnvs_exonCounts <- rbind(nonBSJ_ctrlASDdnvs_exonCounts, nonBSJ_noCtrlASD)
+rm(nonBSJ_noCtrlASD)
+nonBSJ_ctrlASDdnvs_exonCounts$varsKb <- nonBSJ_ctrlASDdnvs_exonCounts$exonVariantCounts/(nonBSJ_ctrlASDdnvs_exonCounts$exonLength/1000)
+mean(nonBSJ_ctrlASDdnvs_exonCounts$varsKb)
+std.error(nonBSJ_ctrlASDdnvs_exonCounts$varsKb)
+
+
+BSJ_nonBSJ_ctrlASDdnvs <- rbind(BSJ_ctrlASDdnvs_exonCounts, nonBSJ_ctrlASDdnvs_exonCounts)
+BSJ_nonBSJ_ctrlASDdnvs$group <- c(rep("BSJ", length(BSJ_ctrlASDdnvs_exonCounts$varsKb)), rep("nonBSJ", length(nonBSJ_ctrlASDdnvs_exonCounts$varsKb)))
+BSJ_nonBSJ_ctrlASDdnvs <- BSJ_nonBSJ_ctrlASDdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = BSJ_nonBSJ_ctrlASDdnvs)
+#Test difference between groups
+z.test(x=BSJ_ctrlASDdnvs_exonCounts$varsKb, sigma.x=sd(BSJ_ctrlASDdnvs_exonCounts$varsKb), y=nonBSJ_ctrlASDdnvs_exonCounts$varsKb, sigma.y=sd(nonBSJ_ctrlASDdnvs_exonCounts$varsKb))
+
+
+
+circExons_unaffected.bed <- read.table("circExons_unaffected.bed", quote="\"")
+colnames(circExons_unaffected.bed) <- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes", "dnvScore", "dnvStrand")
+circExons_ctrlASDdnvs <- circExons_unaffected.bed
+circExons_ctrlASDdnvs$exonLength <- circExons_ctrlASDdnvs$exonEnd - circExons_ctrlASDdnvs$exonStart
+circExons_ctrlASDdnvs <- circExons_ctrlASDdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+circ_ctrlASDdnvs_exonCounts <- circExons_ctrlASDdnvs[,c(4,2,3,13,14)]
+circ_ctrlASDdnvs_exonCounts <- unique(circ_ctrlASDdnvs_exonCounts)
+#Add exons with no variants detected
+circ_noCtrlASD <- subset(circExons, !exonPos %in% circ_ctrlASDdnvs_exonCounts$exonPos)
+circ_noCtrlASD <- circ_noCtrlASD[,c(4,2:3)]
+colnames(circ_noCtrlASD) <- c("exonPos", "exonStart", "exonEnd")
+circ_noCtrlASD$exonLength <- circ_noCtrlASD$exonEnd - circ_noCtrlASD$exonStart
+circ_noCtrlASD <- circ_noCtrlASD[which(circ_noCtrlASD$exonLength > 0),]
+circ_noCtrlASD$exonVariantCounts <- rep(0, length(circ_noCtrlASD$exonPos))
+circ_noCtrlASD <- unique(circ_noCtrlASD)
+#merge and calculate vars/kb 
+circ_ctrlASDdnvs_exonCounts <- rbind(circ_ctrlASDdnvs_exonCounts, circ_noCtrlASD)
+rm(circ_noCtrlASD)
+circ_ctrlASDdnvs_exonCounts$varsKb <- circ_ctrlASDdnvs_exonCounts$exonVariantCounts/(circ_ctrlASDdnvs_exonCounts$exonLength/1000)
+mean(circ_ctrlASDdnvs_exonCounts$varsKb)
+std.error(circ_ctrlASDdnvs_exonCounts$varsKb)
+
+nonCircExons_unaffected.bed <- read.table("nonCircExons_unaffected.bed", quote="\"")
+colnames(nonCircExons_unaffected.bed) <- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes", "dnvScore", "dnvStrand")
+nonCircExons_ctrlASDdnvs <- nonCircExons_unaffected.bed
+nonCircExons_ctrlASDdnvs$exonLength <- nonCircExons_ctrlASDdnvs$exonEnd - nonCircExons_ctrlASDdnvs$exonStart
+nonCircExons_ctrlASDdnvs <- nonCircExons_ctrlASDdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+nonCirc_ctrlASDdnvs_exonCounts <- nonCircExons_ctrlASDdnvs[,c(4,2,3,13,14)]
+nonCirc_ctrlASDdnvs_exonCounts <- unique(nonCirc_ctrlASDdnvs_exonCounts)
+#Add exons with no variants detected
+nonCirc_noCtrlASD <- subset(nonCircExons, !exonPos %in% nonCirc_ctrlASDdnvs_exonCounts$exonPos)
+nonCirc_noCtrlASD <- nonCirc_noCtrlASD[,c(5,3:4)]
+colnames(nonCirc_noCtrlASD) <- c("exonPos", "exonStart", "exonEnd")
+nonCirc_noCtrlASD$exonLength <- nonCirc_noCtrlASD$exonEnd - nonCirc_noCtrlASD$exonStart
+nonCirc_noCtrlASD <- nonCirc_noCtrlASD[which(nonCirc_noCtrlASD$exonLength > 0),]
+nonCirc_noCtrlASD$exonVariantCounts <- rep(0, length(nonCirc_noCtrlASD$exonPos))
+#merge and calculate vars/kb 
+nonCirc_ctrlASDdnvs_exonCounts <- rbind(nonCirc_ctrlASDdnvs_exonCounts, nonCirc_noCtrlASD)
+rm(nonCirc_noCtrlASD)
+nonCirc_ctrlASDdnvs_exonCounts$varsKb <- nonCirc_ctrlASDdnvs_exonCounts$exonVariantCounts/(nonCirc_ctrlASDdnvs_exonCounts$exonLength/1000)
+mean(nonCirc_ctrlASDdnvs_exonCounts$varsKb)
+std.error(nonCirc_ctrlASDdnvs_exonCounts$varsKb)
+
+
+circ_nonCirc_ctrlASDdnvs <- rbind(circ_ctrlASDdnvs_exonCounts, nonCirc_ctrlASDdnvs_exonCounts)
+circ_nonCirc_ctrlASDdnvs$group <- c(rep("circ", length(circ_ctrlASDdnvs_exonCounts$varsKb)), rep("nonCirc", length(nonCirc_ctrlASDdnvs_exonCounts$varsKb)))
+circ_nonCirc_ctrlASDdnvs <- circ_nonCirc_ctrlASDdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = circ_nonCirc_ctrlASDdnvs)
+#Test difference between groups
+z.test(x=circ_ctrlASDdnvs_exonCounts$varsKb, sigma.x=sd(circ_ctrlASDdnvs_exonCounts$varsKb), y=nonCirc_ctrlASDdnvs_exonCounts$varsKb, sigma.y=sd(nonCirc_ctrlASDdnvs_exonCounts$varsKb))
+
+```
+
+
+
+##Analysis of Exon Variants: SCZ
+```{R}
+BSJexons_SCZdnvs <- read.table("BSJexons_SCZdnv_intersect.txt", quote="\"")
+colnames(BSJexons_SCZdnvs) <- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes")
+BSJexons_SCZdnvs$exonLength <- BSJexons_SCZdnvs$exonEnd - BSJexons_SCZdnvs$exonStart
+BSJexons_SCZdnvs <- BSJexons_SCZdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+BSJ_SCZdnvs_exonCounts <- BSJexons_SCZdnvs[,c(4,2,3,11,12)]
+BSJ_SCZdnvs_exonCounts <- unique(BSJ_SCZdnvs_exonCounts)
+#Add exons with no variants detected
+BSJ_noSCZ <- subset(BSJexons, !exonPos %in% BSJ_SCZdnvs_exonCounts$exonPos)
+BSJ_noSCZ <- BSJ_noSCZ[,c(4,2:3)]
+colnames(BSJ_noSCZ) <- c("exonPos", "exonStart", "exonEnd")
+BSJ_noSCZ$exonLength <- BSJ_noSCZ$exonEnd - BSJ_noSCZ$exonStart
+BSJ_noSCZ <- BSJ_noSCZ[which(BSJ_noSCZ$exonLength > 0),]
+BSJ_noSCZ$exonVariantCounts <- rep(0, length(BSJ_noSCZ$exonPos))
+#merge and calculate vars/kb 
+BSJ_SCZdnvs_exonCounts <- rbind(BSJ_SCZdnvs_exonCounts, BSJ_noSCZ)
+rm(BSJ_noSCZ)
+BSJ_SCZdnvs_exonCounts$varsKb <- BSJ_SCZdnvs_exonCounts$exonVariantCounts/(BSJ_SCZdnvs_exonCounts$exonLength/1000)
+mean(BSJ_SCZdnvs_exonCounts$varsKb)
+std.error(BSJ_SCZdnvs_exonCounts$varsKb)
+
+nonBSJexons_SCZdnvs <- read.table("nonBSJexons_SCZdnv_intersect.txt", quote="\"")
+colnames(nonBSJexons_SCZdnvs)<- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes")
+nonBSJexons_SCZdnvs$exonLength <- nonBSJexons_SCZdnvs$exonEnd - nonBSJexons_SCZdnvs$exonStart
+nonBSJexons_SCZdnvs <- nonBSJexons_SCZdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+nonBSJ_SCZdnvs_exonCounts <- nonBSJexons_SCZdnvs[,c(4,2,3,11,12)]
+nonBSJ_SCZdnvs_exonCounts <- unique(nonBSJ_SCZdnvs_exonCounts)
+#Add exons with no variants detected
+nonBSJ_noSCZ <- subset(nonBSJexons, !exonPos %in% nonBSJ_SCZdnvs_exonCounts$exonPos)
+nonBSJ_noSCZ <- nonBSJ_noSCZ[,c(4,2:3)]
+colnames(nonBSJ_noSCZ) <- c("exonPos", "exonStart", "exonEnd")
+nonBSJ_noSCZ$exonLength <- nonBSJ_noSCZ$exonEnd - nonBSJ_noSCZ$exonStart
+nonBSJ_noSCZ <- nonBSJ_noSCZ[which(nonBSJ_noSCZ$exonLength > 0),]
+nonBSJ_noSCZ$exonVariantCounts <- rep(0, length(nonBSJ_noSCZ$exonPos))
+#merge and calculate vars/kb 
+nonBSJ_SCZdnvs_exonCounts <- rbind(nonBSJ_SCZdnvs_exonCounts, nonBSJ_noSCZ)
+rm(nonBSJ_noSCZ)
+nonBSJ_SCZdnvs_exonCounts$varsKb <- nonBSJ_SCZdnvs_exonCounts$exonVariantCounts/(nonBSJ_SCZdnvs_exonCounts$exonLength/1000)
+mean(nonBSJ_SCZdnvs_exonCounts$varsKb)
+std.error(nonBSJ_SCZdnvs_exonCounts$varsKb)
+
+
+BSJ_nonBSJ_SCZdnvs <- rbind(BSJ_SCZdnvs_exonCounts, nonBSJ_SCZdnvs_exonCounts)
+BSJ_nonBSJ_SCZdnvs$group <- c(rep("BSJ", length(BSJ_SCZdnvs_exonCounts$varsKb)), rep("nonBSJ", length(nonBSJ_SCZdnvs_exonCounts$varsKb)))
+BSJ_nonBSJ_SCZdnvs <- BSJ_nonBSJ_SCZdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = BSJ_nonBSJ_SCZdnvs)
+#Test difference between groups
+z.test(x=BSJ_SCZdnvs_exonCounts$varsKb, sigma.x=sd(BSJ_SCZdnvs_exonCounts$varsKb), y=nonBSJ_SCZdnvs_exonCounts$varsKb, sigma.y=sd(nonBSJ_SCZdnvs_exonCounts$varsKb))
+
+
+
+
+circExons_SCZdnvs <- read.table("circExons_SCZdnv_intersect.txt", quote="\"")
+colnames(circExons_SCZdnvs) <- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes")
+circExons_SCZdnvs$exonLength <- circExons_SCZdnvs$exonEnd - circExons_SCZdnvs$exonStart
+circExons_SCZdnvs <- circExons_SCZdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+circ_SCZdnvs_exonCounts <- circExons_SCZdnvs[,c(4,2,3,11,12)]
+circ_SCZdnvs_exonCounts <- unique(circ_SCZdnvs_exonCounts)
+#Add exons with no variants detected
+circ_noSCZ <- subset(circExons, !exonPos %in% circ_SCZdnvs_exonCounts$exonPos)
+circ_noSCZ <- circ_noSCZ[,c(4,2:3)]
+colnames(circ_noSCZ) <- c("exonPos", "exonStart", "exonEnd")
+circ_noSCZ$exonLength <- circ_noSCZ$exonEnd - circ_noSCZ$exonStart
+circ_noSCZ <- circ_noSCZ[which(circ_noSCZ$exonLength > 0),]
+circ_noSCZ$exonVariantCounts <- rep(0, length(circ_noSCZ$exonPos))
+#merge and calculate vars/kb 
+circ_SCZdnvs_exonCounts <- rbind(circ_SCZdnvs_exonCounts, circ_noSCZ)
+rm(circ_noSCZ)
+circ_SCZdnvs_exonCounts$varsKb <- circ_SCZdnvs_exonCounts$exonVariantCounts/(circ_SCZdnvs_exonCounts$exonLength/1000)
+mean(circ_SCZdnvs_exonCounts$varsKb)
+std.error(circ_SCZdnvs_exonCounts$varsKb)
+
+nonCircExons_SCZdnvs <- read.table("nonCircExons_SCZdnv_intersect.txt", quote="\"")
+colnames(nonCircExons_SCZdnvs) <- c("exonChrom", "exonStart", "exonEnd", "exonPos", "exonScore", "exonStrand", "dnvChrom", "dnvStart", "dnvEnd", "dnvNotes")
+nonCircExons_SCZdnvs$exonLength <- nonCircExons_SCZdnvs$exonEnd - nonCircExons_SCZdnvs$exonStart
+nonCircExons_SCZdnvs <- nonCircExons_SCZdnvs %>% group_by(exonPos) %>% mutate(exonVariantCounts=n())
+nonCirc_SCZdnvs_exonCounts <- nonCircExons_SCZdnvs[,c(4,2,3,11,12)]
+nonCirc_SCZdnvs_exonCounts <- unique(nonCirc_SCZdnvs_exonCounts)
+#Add exons with no variants detected
+nonCirc_noSCZ <- subset(nonCircExons, !exonPos %in% nonCirc_SCZdnvs_exonCounts$exonPos)
+nonCirc_noSCZ <- nonCirc_noSCZ[,c(5,3:4)]
+colnames(nonCirc_noSCZ) <- c("exonPos", "exonStart", "exonEnd")
+nonCirc_noSCZ$exonLength <- nonCirc_noSCZ$exonEnd - nonCirc_noSCZ$exonStart
+nonCirc_noSCZ <- nonCirc_noSCZ[which(nonCirc_noSCZ$exonLength > 0),]
+nonCirc_noSCZ$exonVariantCounts <- rep(0, length(nonCirc_noSCZ$exonPos))
+#merge and calculate vars/kb 
+nonCirc_SCZdnvs_exonCounts <- rbind(nonCirc_SCZdnvs_exonCounts, nonCirc_noSCZ)
+rm(nonCirc_noSCZ)
+nonCirc_SCZdnvs_exonCounts$varsKb <- nonCirc_SCZdnvs_exonCounts$exonVariantCounts/(nonCirc_SCZdnvs_exonCounts$exonLength/1000)
+mean(nonCirc_SCZdnvs_exonCounts$varsKb)
+std.error(nonCirc_SCZdnvs_exonCounts$varsKb)
+
+
+circ_nonCirc_SCZdnvs <- rbind(circ_SCZdnvs_exonCounts, nonCirc_SCZdnvs_exonCounts)
+circ_nonCirc_SCZdnvs$group <- c(rep("circ", length(circ_SCZdnvs_exonCounts$varsKb)), rep("nonCirc", length(nonCirc_SCZdnvs_exonCounts$varsKb)))
+circ_nonCirc_SCZdnvs <- circ_nonCirc_SCZdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = circ_nonCirc_SCZdnvs)
+#Test difference between groups
+z.test(x=circ_SCZdnvs_exonCounts$varsKb, sigma.x=sd(circ_SCZdnvs_exonCounts$varsKb), y=nonCirc_SCZdnvs_exonCounts$varsKb, sigma.y=sd(nonCirc_SCZdnvs_exonCounts$varsKb))
+circ_nonCirc_SCZdnvs %>% cohens_d(varsKb ~ group)
+
+```
+
+##Subset and test variants in exons of SFARI genes 
+```{r}
+
+ensembl_gene_ids <- getBM(attributes = c("ensembl_gene_id", "ensembl_transcript_id", "ensembl_exon_id"), filters = "ensembl_transcript_id", values = circTranscripts, mart = ensemblGRCh37)
+
+allExons2 <- getBM(attributes = c("ensembl_transcript_id", "exon_chrom_start", "exon_chrom_end", "chromosome_name", "strand"), filters = "ensembl_transcript_id", values = circTranscripts, mart = ensemblGRCh37)
+allExons2$chrom <- paste("chr", allExons2$chromosome_name, sep = "")
+allExons2$chromosome_name <- NULL
+allExons2$strand <- gsub("-1", "-", allExons2$strand)
+allExons2$strand <- gsub("1", "+", allExons2$strand)
+allExons2$exonPos <- paste(allExons2$chrom, ":", allExons2$strand, ":", allExons2$exon_chrom_start, "-", allExons2$exon_chrom_end, sep = "")
+allExons2 <- unique(allExons2[,c(6,5,4,2:3,1)])
+allExons2$ensembl_gene_id <- with(ensembl_gene_ids, ensembl_gene_id[match(allExons2$ensembl_transcript_id, ensembl_transcript_id)])
+
+
+#Load SFARI gene list
+SFARI_list <- read.csv("SFARI_list.txt", header = FALSE)
+#Load GRCh37 ID/symbol table downloaded from ensembl biomart GRCh37:
+GRCh37_IDs <- read.delim("GRCh37_IDs.txt")
+SFARI_list$ensembl <- with(GRCh37_IDs, ensembl[match(SFARI_list$V1, symbol)])
+SFARI_list <- filter(SFARI_list, ensembl != "NA")
+SFARI_list <- unique(SFARI_list)
+
+#Subset exons in SFARI
+SFARIexons <- subset(allExons2, ensembl_gene_id %in% SFARI_list$ensembl)
+SFARIexons <- unique(SFARIexons[,c(1:5,7)])
+  
+#BSJ/nonBSJexons
+BSJ_SFARIexon_ASDvarCounts <- subset(BSJ_ASDdnvs_exonCounts, exonPos %in% SFARIexons$exonPos)
+mean(BSJ_SFARIexon_ASDvarCounts$varsKb)
+std.error(BSJ_SFARIexon_ASDvarCounts$varsKb)
+
+nonBSJ_SFARIexon_ASDvarCounts <- subset(nonBSJ_ASDdnvs_exonCounts, exonPos %in% SFARIexons$exonPos)
+mean(nonBSJ_SFARIexon_ASDvarCounts$varsKb)
+std.error(nonBSJ_SFARIexon_ASDvarCounts$varsKb)
+
+BSJ_nonBSJ_SFARI_ASDdnvs <- rbind(BSJ_SFARIexon_ASDvarCounts, nonBSJ_SFARIexon_ASDvarCounts)
+BSJ_nonBSJ_SFARI_ASDdnvs$group <- c(rep("BSJ", length(BSJ_SFARIexon_ASDvarCounts$varsKb)), rep("nonBSJ", length(nonBSJ_SFARIexon_ASDvarCounts$varsKb)))
+BSJ_nonBSJ_SFARI_ASDdnvs <- BSJ_nonBSJ_SFARI_ASDdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = BSJ_nonBSJ_SFARI_ASDdnvs)
+#Test difference between groups
+t.test(varsKb ~ group, data = BSJ_nonBSJ_SFARI_ASDdnvs)
+
+
+#circ/nonCircExons
+circ_SFARIexon_ASDvarCounts <- subset(circ_ASDdnvs_exonCounts, exonPos %in% SFARIexons$exonPos)
+mean(circ_SFARIexon_ASDvarCounts$varsKb)
+std.error(circ_SFARIexon_ASDvarCounts$varsKb)
+
+nonCirc_SFARIexon_ASDvarCounts <- subset(nonCirc_ASDdnvs_exonCounts, exonPos %in% SFARIexons$exonPos)
+mean(nonCirc_SFARIexon_ASDvarCounts$varsKb)
+std.error(nonCirc_SFARIexon_ASDvarCounts$varsKb)
+
+circ_nonCirc_SFARI_ASDdnvs <- rbind(circ_SFARIexon_ASDvarCounts, nonCirc_SFARIexon_ASDvarCounts)
+circ_nonCirc_SFARI_ASDdnvs$group <- c(rep("circ", length(circ_SFARIexon_ASDvarCounts$varsKb)), rep("nonCirc", length(nonCirc_SFARIexon_ASDvarCounts$varsKb)))
+circ_nonCirc_SFARI_ASDdnvs <- circ_nonCirc_SFARI_ASDdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = circ_nonCirc_SFARI_ASDdnvs)
+#Test difference between groups
+wilcox.test(varsKb ~ group, data = circ_nonCirc_SFARI_ASDdnvs)
+
+
+###############
+
+#SFARI genes ctrl ASD
+BSJ_SFARIexon_ctrlASDvarCounts <- subset(BSJ_ctrlASDdnvs_exonCounts, exonPos %in% SFARIexons$exonPos)
+mean(BSJ_SFARIexon_ctrlASDvarCounts$varsKb)
+std.error(BSJ_SFARIexon_ctrlASDvarCounts$varsKb)
+
+nonBSJ_SFARIexon_ctrlASDvarCounts <- subset(nonBSJ_ctrlASDdnvs_exonCounts, exonPos %in% SFARIexons$exonPos)
+mean(nonBSJ_SFARIexon_ctrlASDvarCounts$varsKb)
+std.error(nonBSJ_SFARIexon_ctrlASDvarCounts$varsKb)
+
+BSJ_nonBSJ_SFARI_ctrlASDdnvs <- rbind(BSJ_SFARIexon_ctrlASDvarCounts, nonBSJ_SFARIexon_ctrlASDvarCounts)
+BSJ_nonBSJ_SFARI_ctrlASDdnvs$group <- c(rep("BSJ", length(BSJ_SFARIexon_ctrlASDvarCounts$varsKb)), rep("nonBSJ", length(nonBSJ_SFARIexon_ctrlASDvarCounts$varsKb)))
+BSJ_nonBSJ_SFARI_ctrlASDdnvs <- BSJ_nonBSJ_SFARI_ctrlASDdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = BSJ_nonBSJ_SFARI_ctrlASDdnvs)
+t.test(varsKb ~ group, data = BSJ_nonBSJ_SFARI_ctrlASDdnvs)
+BSJ_nonBSJ_SFARI_ctrlASDdnvs %>% cohens_d(varsKb ~ group)
+
+#circ/nonCircExons
+circ_SFARIexon_ctrlASDvarCounts <- subset(circ_ctrlASDdnvs_exonCounts, exonPos %in% SFARIexons$exonPos)
+mean(circ_SFARIexon_ctrlASDvarCounts$varsKb)
+std.error(circ_SFARIexon_ctrlASDvarCounts$varsKb)
+
+nonCirc_SFARIexon_ctrlASDvarCounts <- subset(nonCirc_ctrlASDdnvs_exonCounts, exonPos %in% SFARIexons$exonPos)
+mean(nonCirc_SFARIexon_ctrlASDvarCounts$varsKb)
+std.error(nonCirc_SFARIexon_ctrlASDvarCounts$varsKb)
+
+circ_nonCirc_SFARI_ctrlASDdnvs <- rbind(circ_SFARIexon_ctrlASDvarCounts, nonCirc_SFARIexon_ctrlASDvarCounts)
+circ_nonCirc_SFARI_ctrlASDdnvs$group <- c(rep("circ", length(circ_SFARIexon_ctrlASDvarCounts$varsKb)), rep("nonCirc", length(nonCirc_SFARIexon_ctrlASDvarCounts$varsKb)))
+circ_nonCirc_SFARI_ctrlASDdnvs <- circ_nonCirc_SFARI_ctrlASDdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = circ_nonCirc_SFARI_ctrlASDdnvs)
+#Test difference between groups
+wilcox.test(varsKb ~ group, data = circ_nonCirc_SFARI_ctrlASDdnvs)
+
+```
+
+
+##Subset and test variants in exons of SCZ risk genes 
+```{r}
+
+#Load SCZ gene list
+SCZ_list <- read.csv("SCZ_list.txt", header = FALSE)
+SCZ_list$ensembl <- with(GRCh37_IDs, ensembl[match(SCZ_list$V1, symbol)])
+SCZ_list <- filter(SCZ_list, ensembl != "NA")
+SCZ_list <- unique(SCZ_list)
+
+#Subset exons from SCZ genes
+SCZexons <- subset(allExons2, ensembl_gene_id %in% SCZ_list$ensembl)
+SCZexons <- unique(SCZexons[,c(1:5,7)])
+
+
+#BSJ/nonBSJexons
+BSJ_SCZexon_SCZvarCounts <- subset(BSJ_SCZdnvs_exonCounts, exonPos %in% SCZexons$exonPos)
+mean(BSJ_SCZexon_SCZvarCounts$varsKb)
+std.error(BSJ_SCZexon_SCZvarCounts$varsKb)
+
+nonBSJ_SCZexon_SCZvarCounts <- subset(nonBSJ_SCZdnvs_exonCounts, exonPos %in% SCZexons$exonPos)
+mean(nonBSJ_SCZexon_SCZvarCounts$varsKb)
+std.error(nonBSJ_SCZexon_SCZvarCounts$varsKb)
+
+BSJ_nonBSJ_SCZexon_SCZdnvs <- rbind(BSJ_SCZexon_SCZvarCounts, nonBSJ_SCZexon_SCZvarCounts)
+BSJ_nonBSJ_SCZexon_SCZdnvs$group <- c(rep("BSJ", length(BSJ_SCZexon_SCZvarCounts$varsKb)), rep("nonBSJ", length(nonBSJ_SCZexon_SCZvarCounts$varsKb)))
+BSJ_nonBSJ_SCZexon_SCZdnvs <- BSJ_nonBSJ_SCZexon_SCZdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = BSJ_nonBSJ_SCZexon_SCZdnvs)
+#Test difference between groups
+t.test(varsKb ~ group, data = BSJ_nonBSJ_SCZexon_SCZdnvs)
+
+#circ/nonCircExons
+circ_SCZexon_SCZvarCounts <- subset(circ_SCZdnvs_exonCounts, exonPos %in% SCZexons$exonPos)
+mean(circ_SCZexon_SCZvarCounts$varsKb)
+std.error(circ_SCZexon_SCZvarCounts$varsKb)
+
+nonCirc_SCZexon_SCZvarCounts <- subset(nonCirc_SCZdnvs_exonCounts, exonPos %in% SCZexons$exonPos)
+mean(nonCirc_SCZexon_SCZvarCounts$varsKb)
+std.error(nonCirc_SCZexon_SCZvarCounts$varsKb)
+
+circ_nonCirc_SCZ_SCZdnvs <- rbind(circ_SCZexon_SCZvarCounts, nonCirc_SCZexon_SCZvarCounts)
+circ_nonCirc_SCZ_SCZdnvs$group <- c(rep("circ", length(circ_SCZexon_SCZvarCounts$varsKb)), rep("nonCirc", length(nonCirc_SCZexon_SCZvarCounts$varsKb)))
+circ_nonCirc_SCZ_SCZdnvs <- circ_nonCirc_SCZ_SCZdnvs[,c(7,6)]
+
+#Test homogeneity of variance
+leveneTest(varsKb ~ group, data = circ_nonCirc_SCZ_SCZdnvs)
+#Test difference between groups
+t.test(varsKb ~ group, data = circ_nonCirc_SCZ_SCZdnvs)
+
+```
