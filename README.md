@@ -10,4 +10,4 @@ Michelle Watts (1,2), Marika Oksanen (1,2,3), Sanna Lejerkrans (1,2), Francesca 
 
 Correspondence: [kristiina.tammimies@ki.se](mailto:kristiina.tammimies@ki.se)
 
-**Currently available as a preprint at bioRxiv: (DOI: [ ](https://doi.org/ )**
+**Currently available as a preprint at bioRxiv (DOI: [ ](https://doi.org/ )**
