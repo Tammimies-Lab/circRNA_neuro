@@ -38,15 +38,6 @@ library("DEXSeq")
 library("stringr")
 library("tidyverse")
 library("reshape2")
-
-
-library("plotrix")
-library("rstatix")
-library("BSDA")
-library("data.table")
-library("stats")
-library("pwr")
-library("biomaRt")
 ```
 
 ##Initialise circRNAprofiler folder
