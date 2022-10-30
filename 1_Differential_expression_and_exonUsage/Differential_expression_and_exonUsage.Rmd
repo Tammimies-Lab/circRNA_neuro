@@ -1,0 +1,1152 @@
+---
+title: "Differential expression and exon usage analyses"
+author: "MW"
+editor_options:
+  chunk_output_type: console
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  bookdown::html_document2:
+    code_folding: show
+    toc: yes
+    toc_float:
+      collapsed: no
+params:
+  dataset: 1
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      results = "hold",
+                      message = FALSE,
+                      warning = FALSE)
+```
+
+## Analysis of differential circRNA expression/linear RNA expression and exon usage
+
+## Load packages
+```{r}
+library("circRNAprofiler")
+library("dplyr")
+library("DESeq2")
+library("DEGreport")
+library("DOSE")
+library("clusterProfiler")
+library("AnnotationDbi")
+library("org.Hs.eg.db")
+library("ggpubr")
+library("DEXSeq")
+library("stringr")
+library("tidyverse")
+library("reshape2")
+```
+
+##Initialise circRNAprofiler folder
+```{r, eval=FALSE}
+
+# Create working directory for running circRNAprofiler:
+
+#initCircRNAprofiler(projectFolderName = "circRNAprofiler",detectionTools = c("circexplorer2", "mapsplice", "other"))
+
+#Read output copied into created sub-directories and set up  as described in circRNAprofiler manual.
+#copy GTF file used for circRNA detection into folder as: "GRCh37.gtf"
+
+```
+
+##Merge circRNA detection data from threee programs
+```{r, eval=FALSE}
+# Verify folder setup:
+check <- checkProjectFolder()
+check
+
+# Format GTF and get back-spliced junctions
+gtf <- formatGTF(pathToGTF = "GRCh37.gtf")
+backSplicedJunctions <- getBackSplicedJunctions(gtf)
+
+# Circexplorer detected circRNAs won't merge correctly with other programs as they detected splice junctions are out by 1 bp at either startUpBSE or endDownBSE.
+
+# To Fix this issue for endDownBSE:
+backSplicedJunctions <- BSJs %>% dplyr::mutate(endDownBSE = ifelse(.data$tool =="ce", .data$endDownBSE+1, .data$endDownBSE))
+
+# Merge BSJs:
+mergedBSJunctions <- mergeBSJunctions(BSJs, gtf)
+
+# To Fix this issue for startUpBSE:
+mergedBSJunctions <- mergedBSJunctions %>% dplyr::mutate(endDownBSE = ifelse(.data$tool =="ce", .data$endDownBSE-1, .data$endDownBSE))
+mergedBSJunctions <- mergedBSJunctions %>% dplyr::mutate(startUpBSE = ifelse(.data$tool =="ce", .data$startUpBSE+1, .data$startUpBSE))
+mergedBSJunctions <- mergeBSJunctions(mergedBSJunctions, gtf)
+
+# To remove circRNAsnot annotated to any gene:
+mergedBSJunctions <- subset(mergedBSJunctions, gene != "n/a")
+
+# Filter by read count:
+filteredCirc <- filterCirc(mergedBSJunctions, allSamples = FALSE, min = 3)
+
+#Filter out circRNAs only detected by one program:
+circRNAs <- filteredCirc[which(filteredCirc$tool != 'ms' & filteredCirc$tool != 'ot' & filteredCirc$tool != 'ce'),]
+
+#Annotate circRNAs
+annotatedCirc <- annotateBSJs(circRNAs, gtf)
+
+```
+
+
+#Analysis with DESeq2 - Pair-wise Comparions:
+```{r, eval=FALSE}
+
+# Create a copy of the filtered counts matix as object "circRNAcounts":
+circRNAcounts <- circRNAs[, -c(1:7)]
+rownames(circRNAcounts) <- circRNAs$id
+
+# Create colData object with cell and time point factors, where rows match columns (samples) of countdata:
+colData <- as.data.frame(c(
+            rep("CTRL9II_NES", 4), 
+            rep("CTRL9II_D5", 4),
+            rep("CTRL9II_D28", 3)),
+            row.names = colnames(circRNAcounts)
+)
+
+colnames(colData) <- "Time"
+colData$Time <- as.factor(colData$Time)
+
+
+# Create DEseq object:
+dds <- DESeqDataSetFromMatrix(
+    countData = circRNAcounts, 
+    colData = colData, 
+    design = ~ Time
+)
+
+dds <- DESeq(dds)
+
+#Get results:
+res_D5vNES <- results(dds, contrast = c("Time", "CTRL9II_D5", "CTRL9II_NES"))
+#Run log fold-change shrinkage analysis:
+res_D5vNES_s <- lfcShrink(dds, contrast = c("Time", "CTRL9II_D5", "CTRL9II_NES"), type = "ashr")
+
+#Get results:
+res_D28vNES <- results(dds, contrast = c("Time", "CTRL9II_D28", "CTRL9II_NES"))
+#Run log fold-change shrinkage analysis:
+res_D28vNES_s <- lfcShrink(dds, contrast = c("Time", "CTRL9II_D28", "CTRL9II_NES"), type = "ashr")
+
+#Get results:
+res_D28vD5 <- results(dds, contrast = c("Time", "CTRL9II_D28", "CTRL9II_D5"))
+#Run log fold-change shrinkage analysis:
+res_D28vD5_s <- lfcShrink(dds, contrast = c("Time", "CTRL9II_D28", "CTRL9II_D5"), type = "ashr")
+```
+
+#Subset significant DEcircRNAs (using padj < 0.05 and lfc_shrink value >=2 or <= -2)
+```{r, eval=FALSE}
+
+res_D5vNES_df <- as.data.frame(res_D5vNES)
+res_D5vNES_df$lfc_shrink <- res_D5vNES_s$log2FoldChange
+res_D5vNES_df$lfc_shrink_SE <- res_D5vNES_s$lfcSE
+upD5vNES <- res_D5vNES_df[which(res_D5vNES_df$lfc_shrink >= 2 & res_D5vNES_df$padj <= 0.05), ]
+dwnD5vNES <- res_D5vNES_df[which(res_D5vNES_df$lfc_shrink <= -2 & res_D5vNES_df$padj <= 0.05), ]
+
+res_D28vD5_df <- as.data.frame(res_D28vD5)
+res_D28vD5_df$lfc_shrink <- res_D28vD5_s$log2FoldChange
+res_D28vD5_df$lfc_shrink_SE <- res_D28vD5_s$lfcSE
+upD28vD5 <- res_D28vD5_df[which(res_D28vD5_df$lfc_shrink >= 2 & res_D28vD5_df$padj <= 0.05), ]
+dwnD28vD5 <- res_D28vD5_df[which(res_D28vD5_df$lfc_shrink <= -2 & res_D28vD5_df$padj <= 0.05), ]
+
+res_D28vNES_df <- as.data.frame(res_D28vNES)
+res_D28vNES_df$lfc_shrink <- res_D28vNES_s$log2FoldChange
+res_D28vNES_df$lfc_shrink_SE <- res_D28vNES_s$lfcSE
+upD28vNES <- res_D28vNES_df[which(res_D28vNES_df$lfc_shrink >= 2 & res_D28vNES_df$padj <= 0.05), ]
+dwnD28vNES <- res_D28vNES_df[which(res_D28vNES_df$lfc_shrink <= -2 & res_D28vNES_df$padj <= 0.05), ]
+```
+
+
+#For analysis of time-series use DESeq likelihood ratio test (LRT; comparble to an ANOVA):
+```{r, eval=FALSE}
+
+# Create copy of DESeqObject
+ddsLRT <- DESeqDataSetFromMatrix(
+            countData = circRNAcounts,
+            colData = colData,
+            design = ~ Time
+            )
+
+# LRT:
+ddsLRT <- DESeq(ddsLRT, test = "LRT", reduced = ~1)
+resLRT <- results(ddsLRT)
+
+
+# Perform pattern analysis using degPattern
+ma <- assay(rlog(ddsLRT))[which(resLRT$padj <0.05), ]
+design <- as.data.frame(colData(ddsLRT))
+pattRes <- degPatterns(ma, design, time = "Time")
+
+```
+
+#Pathway analysis with clusterProfiler - GO terms enriched in clusters
+```{r, eval=FALSE}
+
+#Create background list of all genes (circRNAs) tested for differential expression:
+backgroundGeneList <- rownames(res_D28vNES_df) # Generate 'background' gene list
+backgroundGeneList <- sapply(strsplit(as.character(backgroundGeneList), ":+"), "[", 1) # Extract gene symbol from circRNA IDs
+backgroundGeneList <- unique(backgroundGeneList)
+backgroundGeneList <- as.data.frame(backgroundGeneList)
+
+#Ensembl IDs were mapped from symbols using IDs downloaded from ensembl biomart GRCh37:
+GRCh37_IDs <- read.delim("GRCh37_IDs.txt")
+
+backgroundGeneList$ensembl <- with(GRCh37_IDs, ensembl[match(backgroundGeneList$backgroundGeneList, symbol)])
+backgroundGeneList <- filter(backgroundGeneList, ensembl != "NA")
+backgroundGeneList <- backgroundGeneList$ensembl
+
+
+#Due to clusterProfiler packages replacing symbol - labels need to be fixed.
+circIDs <- circRNAs[,c(1:2)]
+circIDs$cluster_id <-  circIDs$id
+circIDs$cluster_id <- gsub("+", ".", circIDs$cluster_id, fixed = TRUE)
+circIDs$cluster_id <- gsub(":", ".", circIDs$cluster_id, fixed = TRUE)
+circIDs$cluster_id <- gsub("-", ".", circIDs$cluster_id, fixed = TRUE)
+
+pattRes_df$id <- with(circIDs, id[match(pattRes_df$genes, cluster_id)])
+pattRes_df$symbol <- sapply(strsplit(as.character(pattRes_df$id),  ":+"), "[", 1) # Extract symbol
+pattRes_symbols <- pattRes_df[,c(11,7)]
+pattRes_symbols <- unique(pattRes_symbols)
+
+
+cluster1 <- pattRes_symbols[which(pattRes_symbols$cluster == 1), ]
+cluster1$ensembl <- with(GRCh37_IDs, ensembl[match(cluster1$symbol, symbol)])
+cluster1 <- filter(cluster1, ensembl != "NA")
+cluster1 <- cluster1$ensembl
+
+
+cluster2 <- pattRes_symbols[which(pattRes_symbols$cluster == 2), ]
+cluster2$ensembl <- with(GRCh37_IDs, ensembl[match(cluster2$symbol, symbol)])
+cluster2 <- filter(cluster2, ensembl != "NA")
+cluster2 <- cluster2$ensembl
+
+
+cluster3 <- pattRes_symbols[which(pattRes_symbols$cluster == 3), ]
+cluster3$ensembl <- with(GRCh37_IDs, ensembl[match(cluster3$symbol, symbol)])
+cluster3 <- filter(cluster3, ensembl != "NA")
+cluster3 <- cluster3$ensembl
+
+
+cluster4 <- pattRes_symbols[which(pattRes_symbols$cluster == 4), ]
+cluster4$ensembl <- with(GRCh37_IDs, ensembl[match(cluster4$symbol, symbol)])
+cluster4 <- filter(cluster4, ensembl != "NA")
+cluster4 <- cluster4$ensembl
+
+
+# Run EGO
+ego_C1 <- enrichGO(
+                gene = cluster1,
+                universe = backgroundGeneList,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+)
+
+# Run EGO
+ego_C2 <- enrichGO(
+                gene = cluster2,
+                universe = backgroundGeneList,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+)
+
+
+ego_C3 <- enrichGO(
+                gene = cluster3,
+                universe = backgroundGeneList,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+) 
+
+ego_C4 <- enrichGO(
+                gene = cluster4,
+                universe = backgroundGeneList,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+) 
+
+```
+
+#Pathway analysis with clusterProfiler - GO terms enriched in DEcirc subsets
+```{r, eval=FALSE}
+
+#Day 28 vs NES
+upD28vNES$symbol <- sapply(strsplit(as.character(rownames(upD28vNES)), ":+"), "[", 1)
+upD28vNES$ensembl <- with(GRCh37_IDs, ensembl[match(upD28vNES$symbol, symbol)])
+upD28vNES_ensembl <- filter(upD28vNES, ensembl != "NA")
+upD28vNES_ensembl <- upD28vNES_ensembl$ensembl
+upD28vNES_ensembl <- unique(upD28vNES_ensembl) 
+
+dwnD28vNES$symbol <- sapply(strsplit(as.character(rownames(dwnD28vNES)), ":+"), "[", 1)
+dwnD28vNES$ensembl <- with(GRCh37_IDs, ensembl[match(dwnD28vNES$symbol, symbol)])
+dwnD28vNES_ensembl <- filter(dwnD28vNES, ensembl != "NA")
+dwnD28vNES_ensembl <- dwnD28vNES_ensembl$ensembl
+dwnD28vNES_ensembl <- unique(dwnD28vNES_ensembl)
+
+ego_upD28vNES <- enrichGO(
+                gene = upD28vNES_ensembl,
+                universe = backgroundGeneList,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+)
+
+
+ego_dwnD28vNES <- enrichGO(
+                gene = dwnD28vNES_ensembl,
+                universe = backgroundGeneList,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+) 
+
+
+
+
+#Day 28 vs Day 5
+upD28vD5$symbol <- sapply(strsplit(as.character(rownames(upD28vD5)), ":+"), "[", 1)
+upD28vD5$ensembl <- with(GRCh37_IDs, ensembl[match(upD28vD5$symbol, symbol)])
+upD28vD5_ensembl <- filter(upD28vD5, ensembl != "NA")
+upD28vD5_ensembl <- upD28vD5_ensembl$ensembl
+upD28vD5_ensembl <- unique(upD28vD5_ensembl) 
+
+dwnD28vD5$symbol <- sapply(strsplit(as.character(rownames(dwnD28vD5)), ":+"), "[", 1)
+dwnD28vD5$ensembl <- with(GRCh37_IDs, ensembl[match(dwnD28vD5$symbol, symbol)])
+dwnD28vD5_ensembl <- filter(dwnD28vD5, ensembl != "NA")
+dwnD28vD5_ensembl <- dwnD28vD5_ensembl$ensembl
+dwnD28vD5_ensembl <- unique(dwnD28vD5_ensembl)
+
+ego_upD28vD5 <- enrichGO(
+                gene = upD28vD5_ensembl,
+                universe = backgroundGeneList,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+)
+
+
+ego_dwnD28vD5 <- enrichGO(
+                gene = dwnD28vD5_ensembl,
+                universe = backgroundGeneList,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+)
+
+
+
+
+#Day 5 vs NES
+upD5vNES$symbol <- sapply(strsplit(as.character(rownames(upD5vNES)), ":+"), "[", 1)
+upD5vNES$ensembl <- with(GRCh37_IDs, ensembl[match(upD5vNES$symbol, symbol)])
+upD5vNES_ensembl <- filter(upD5vNES, ensembl != "NA")
+upD5vNES_ensembl <- upD5vNES_ensembl$ensembl
+upD5vNES_ensembl <- unique(upD5vNES_ensembl) 
+
+dwnD5vNES$symbol <- sapply(strsplit(as.character(rownames(dwnD5vNES)), ":+"), "[", 1)
+dwnD5vNES$ensembl <- with(GRCh37_IDs, ensembl[match(dwnD5vNES$symbol, symbol)])
+dwnD5vNES_ensembl <- filter(dwnD5vNES, ensembl != "NA")
+dwnD5vNES_ensembl <- dwnD5vNES_ensembl$ensembl
+dwnD5vNES_ensembl <- unique(dwnD5vNES_ensembl)
+
+ego_upD5vNES <- enrichGO(
+                gene = upD5vNES_ensembl,
+                universe = backgroundGeneList,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+)
+
+
+ego_dwnD5vNES <- enrichGO(
+                gene = dwnD5vNES_ensembl,
+                universe = backgroundGeneList,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+) 
+
+```
+
+#Pathway analysis with clusterProfiler - GO term Gene Set Enrichment analysis of pair-wise comparison:
+```{r, eval=FALSE}
+
+#D28vNES analysis
+res_D28vNES_df$symbol <- sapply(strsplit(as.character(rownames(res_D28vNES_df)), ":+"), "[", 1) #Extract Gene symbol
+res_D28vNES_df$entrez <- with(GRCh37_IDs, entrez[match(res_D28vNES_df$symbol, symbol)]) #Map entrez IDs
+res_D28vNES_entrez <- filter(res_D28vNES_df, entrez != "NA") #New dataframe with 'NA' entrez values removed
+
+#seperate up and down -regulated circRNAs and take the max an min fold-change respectively for gsea analysis:
+res_D28vNES_entrez_up <- res_D28vNES_entrez[which(res_D28vNES_entrez$lfc_shrink > 0),]
+res_D28vNES_entrez_up <- res_D28vNES_entrez_up %>% group_by(entrez) %>% mutate(max_lfc_shrink=max(lfc_shrink))
+res_D28vNES_entrez_up <- res_D28vNES_entrez_up[which(duplicated(res_D28vNES_entrez_up$entrez) == F), ]
+
+res_D28vNES_entrez_dwn <- res_D28vNES_entrez[which(res_D28vNES_entrez$lfc_shrink < 0),]
+res_D28vNES_entrez_dwn <- res_D28vNES_entrez_dwn %>% group_by(entrez) %>% mutate(min_lfc_shrink=min(lfc_shrink))
+res_D28vNES_entrez_dwn <- res_D28vNES_entrez_dwn[which(duplicated(res_D28vNES_entrez_dwn$entrez) == F), ]
+
+#Create decreasing list of fold-changes with entrez IDs as names and input to gseGO function:
+D28vNES_list_up <- res_D28vNES_entrez_up$max_lfc_shrink
+names(D28vNES_list_up) <- res_D28vNES_entrez_up$entrez
+D28vNES_list_up <- sort(D28vNES_list_up, decreasing = TRUE)
+D28vNES_gseGO_up <- gseGO(D28vNES_list_up, ont = "BP", OrgDb = org.Hs.eg.db, keyType = "ENTREZID", scoreType = "pos", pvalueCutoff = 0.1)
+D28vNES_gseGO_up@result$Description <- firstup(as.character(D28vNES_gseGO_up@result$Description))
+write.csv(D28vNES_gseGO_up@result, "gsea_D28vNES_up.csv")
+
+D28vNES_list_dwn <- res_D28vNES_entrez_dwn$min_lfc_shrink
+names(D28vNES_list_dwn) <- res_D28vNES_entrez_dwn$entrez
+D28vNES_list_dwn <- sort(D28vNES_list_dwn, decreasing = TRUE)
+D28vNES_gseGO_dwn <- gseGO(D28vNES_list_dwn, ont = "BP", OrgDb = org.Hs.eg.db, keyType = "ENTREZID", scoreType = "neg", pvalueCutoff = 0.1)
+
+
+
+
+#D28vD5 analysis
+res_D28vD5_df$symbol <- sapply(strsplit(as.character(rownames(res_D28vD5_df)), ":+"), "[", 1) #Extract Gene symbol
+res_D28vD5_df$entrez <- with(GRCh37_IDs, entrez[match(res_D28vD5_df$symbol, symbol)]) #Map entrez IDs
+res_D28vD5_entrez <- filter(res_D28vD5_df, entrez != "NA") #New dataframe with 'NA' entrez values removed
+
+#seperate up and down -regulated circRNAs and take the max an min fold-change respectivley for gsea analysis:
+res_D28vD5_entrez_up <- res_D28vD5_entrez[which(res_D28vD5_entrez$lfc_shrink > 0),]
+res_D28vD5_entrez_up <- res_D28vD5_entrez_up %>% group_by(entrez) %>% mutate(max_lfc_shrink=max(lfc_shrink))
+res_D28vD5_entrez_up <- res_D28vD5_entrez_up[which(duplicated(res_D28vD5_entrez_up$entrez) == F), ]
+
+res_D28vD5_entrez_dwn <- res_D28vD5_entrez[which(res_D28vD5_entrez$lfc_shrink < 0),]
+res_D28vD5_entrez_dwn <- res_D28vD5_entrez_dwn %>% group_by(entrez) %>% mutate(min_lfc_shrink=min(lfc_shrink))
+res_D28vD5_entrez_dwn <- res_D28vD5_entrez_dwn[which(duplicated(res_D28vD5_entrez_dwn$entrez) == F), ]
+
+#Create decreasing list of fold-changes with entrez IDs as names and input to gseGO function:
+D28vD5_list_up <- res_D28vD5_entrez_up$max_lfc_shrink
+names(D28vD5_list_up) <- res_D28vD5_entrez_up$entrez
+D28vD5_list_up <- sort(D28vD5_list_up, decreasing = TRUE)
+D28vD5_gseGO_up <- gseGO(D28vD5_list_up, ont = "BP", OrgDb = org.Hs.eg.db, keyType = "ENTREZID", scoreType = "pos", pvalueCutoff = 0.1)
+
+
+
+D28vD5_list_dwn <- res_D28vD5_entrez_dwn$min_lfc_shrink
+names(D28vD5_list_dwn) <- res_D28vD5_entrez_dwn$entrez
+D28vD5_list_dwn <- sort(D28vD5_list_dwn, decreasing = TRUE)
+D28vD5_gseGO_dwn <- gseGO(D28vD5_list_dwn, ont = "BP", OrgDb = org.Hs.eg.db, keyType = "ENTREZID", scoreType = "neg", pvalueCutoff = 0.1)
+
+
+
+
+#D5vNES
+res_D5vNES_df$symbol <- sapply(strsplit(as.character(rownames(res_D5vNES_df)), ":+"), "[", 1) #Extract Gene symbol
+res_D5vNES_df$entrez <- with(GRCh37_IDs, entrez[match(res_D5vNES_df$symbol, symbol)]) #Map entrez IDs
+res_D5vNES_entrez <- filter(res_D5vNES_df, entrez != "NA") #New dataframe with 'NA' entrez values removed
+
+#seperate up and down -regulated circRNAs and take the max an min fold-change respectivley for gsea analysis:
+res_D5vNES_entrez_up <- res_D5vNES_entrez[which(res_D5vNES_entrez$lfc_shrink > 0),]
+res_D5vNES_entrez_up <- res_D5vNES_entrez_up %>% group_by(entrez) %>% mutate(max_lfc_shrink=max(lfc_shrink))
+res_D5vNES_entrez_up <- res_D5vNES_entrez_up[which(duplicated(res_D5vNES_entrez_up$entrez) == F), ]
+
+res_D5vNES_entrez_dwn <- res_D5vNES_entrez[which(res_D5vNES_entrez$lfc_shrink < 0),]
+res_D5vNES_entrez_dwn <- res_D5vNES_entrez_dwn %>% group_by(entrez) %>% mutate(min_lfc_shrink=min(lfc_shrink))
+res_D5vNES_entrez_dwn <- res_D5vNES_entrez_dwn[which(duplicated(res_D5vNES_entrez_dwn$entrez) == F), ]
+
+#Creat decreasing list of fold-changes with entrez IDs as names and input to gseGO function:
+D5vNES_list_up <- res_D5vNES_entrez_up$max_lfc_shrink
+names(D5vNES_list_up) <- res_D5vNES_entrez_up$entrez
+D5vNES_list_up <- sort(D5vNES_list_up, decreasing = TRUE)
+D5vNES_gseGO_up <- gseGO(D5vNES_list_up, ont = "BP", OrgDb = org.Hs.eg.db, keyType = "ENTREZID", scoreType = "pos", pvalueCutoff = 0.1)
+
+
+
+D5vNES_list_dwn <- res_D5vNES_entrez_dwn$min_lfc_shrink
+names(D5vNES_list_dwn) <- res_D5vNES_entrez_dwn$entrez
+D5vNES_list_dwn <- sort(D5vNES_list_dwn, decreasing = TRUE)
+D5vNES_gseGO_dwn <- gseGO(D5vNES_list_dwn, ont = "BP", OrgDb = org.Hs.eg.db, keyType = "ENTREZID", scoreType = "neg", pvalueCutoff = 0.1)
+
+
+```
+
+#Pathway analysis with clusterProfiler - Enrichment of NDD,SFARI and SCZ genes
+```{r, eval=FALSE}
+# To test enrichment of NDD genes and SFARI genes import SFARI and NDD list of ensembl ids and create TERM2GENE dataframe "NDD_SFARI":
+SFARI_list <- read.csv("SFARI_list.txt", header = FALSE)
+SFARI_list$ensembl <- with(GRCh37_IDs, ensembl[match(SFARI_list$V1, symbol)])
+SFARI_list <- filter(SFARI_list, ensembl != "NA")
+SFARI_list <- unique(SFARI_list)
+SFARI_list$Term <- rep("SFARI", length(SFARI_list$ensembl))
+SFARI_list <- SFARI_list[,c(2:3)]
+colnames(SFARI_list) <- c("gene", "term")
+
+NDD_list <- read.csv("NDD_list.txt", header = FALSE)
+NDD_list$ensembl <- with(GRCh37_IDs, ensembl[match(NDD_list$V1, symbol)])
+NDD_list <- filter(NDD_list, ensembl != "NA")
+NDD_list <- unique(NDD_list)
+NDD_list$Term <- rep("NDD", length(NDD_list$ensembl))
+NDD_list <- NDD_list[,c(2:3)]
+colnames(NDD_list) <- c("gene", "term")
+
+SCZ_list <- read.csv("SCZ_list.txt", header = FALSE)
+SCZ_list$ensembl <- with(GRCh37_IDs, ensembl[match(SCZ_list$V1, symbol)])
+SCZ_list <- filter(SCZ_list, ensembl != "NA")
+SCZ_list <- unique(SCZ_list)
+SCZ_list$Term <- rep("SCZ", length(SCZ_list$ensembl))
+SCZ_list <- SCZ_list[,c(2:3)]
+colnames(SCZ_list) <- c("gene", "term")
+
+NDD_SFARI_SCZ <- rbind(NDD_list, SFARI_list, SCZ_list)
+NDD_SFARI_SCZ <- NDD_SFARI_SCZ[, c(2,1)]
+
+######
+
+#Run ego tests:
+NDDenrich_C1 <- enricher(
+      gene = cluster1,
+      universe = backgroundGeneList,
+      pAdjustMethod = "BH",
+      qvalueCutoff = 0.05,
+      TERM2GENE = NDD_SFARI_SCZ,
+      maxGSSize = 3000
+)
+
+NDDenrich_C2 <- enricher(
+      gene = cluster2,
+      universe = backgroundGeneList,
+      pAdjustMethod = "BH",
+      qvalueCutoff = 0.05,
+      TERM2GENE = NDD_SFARI_SCZ,
+      maxGSSize = 3000
+)
+
+NDDenrich_C3 <- enricher(
+      gene = cluster3,
+      universe = backgroundGeneList,
+      pAdjustMethod = "BH",
+      qvalueCutoff = 0.05,
+      TERM2GENE = NDD_SFARI_SCZ,
+      maxGSSize = 3000
+)
+
+NDDenrich_C4 <- enricher(
+      gene = cluster4,
+      universe = backgroundGeneList,
+      pAdjustMethod = "BH",
+      qvalueCutoff = 0.05,
+      TERM2GENE = NDD_SFARI_SCZ,
+      maxGSSize = 3000
+)
+
+
+NDDenrich_upD28vNES <- enricher(
+      gene = upD28vNES_ensembl,
+      universe = backgroundGeneList,
+      pAdjustMethod = "BH",
+      qvalueCutoff = 0.05,
+      TERM2GENE = NDD_SFARI_SCZ,
+      maxGSSize = 3000
+)
+
+NDDenrich_dwnD28vNES <- enricher(
+      gene = dwnD28vNES_ensembl,
+      universe = backgroundGeneList,
+      pAdjustMethod = "BH",
+      qvalueCutoff = 0.05,
+      TERM2GENE = NDD_SFARI_SCZ,
+      maxGSSize = 3000
+)
+
+
+NDDenrich_upD28vD5 <- enricher(
+      gene = upD28vD5_ensembl,
+      universe = backgroundGeneList,
+      pAdjustMethod = "BH",
+      qvalueCutoff = 0.05,
+      TERM2GENE = NDD_SFARI_SCZ,
+      maxGSSize = 3000
+)
+
+NDDenrich_dwnD28vD5 <- enricher(
+      gene = dwnD28vD5_ensembl,
+      universe = backgroundGeneList,
+      pAdjustMethod = "BH",
+      qvalueCutoff = 0.05,
+      TERM2GENE = NDD_SFARI_SCZ,
+      maxGSSize = 3000
+)
+
+
+NDDenrich_upD5vNES <- enricher(
+      gene = upD5vNES_ensembl,
+      universe = backgroundGeneList,
+      pAdjustMethod = "BH",
+      qvalueCutoff = 0.05,
+      TERM2GENE = NDD_SFARI_SCZ,
+      maxGSSize = 3000
+)
+
+NDDenrich_dwnD5vNES <- enricher(
+      gene = dwnD5vNES_ensembl,
+      universe = backgroundGeneList,
+      pAdjustMethod = "BH",
+      qvalueCutoff = 0.05,
+      TERM2GENE = NDD_SFARI_SCZ,
+      maxGSSize = 3000
+)
+
+#######
+
+#Combine Results:
+NDDenrich_C1@result$Description <- "Cluster 1"
+NDDenrich_C2@result$Description <- "Cluster 2"
+NDDenrich_C3@result$Description <- "Cluster 3"
+NDDenrich_C4@result$Description <- "Cluster 4"
+NDDenrich_upD28vNES@result$Description <- "Upregulated Day 28 vs NES"
+NDDenrich_upD28vD5@result$Description<- "Upregulated Day 28 vs Day 5"
+NDDenrich_upD5vNES@result$Description <- "Upregulated Day 5 vs NES"
+NDDenrich_dwnD28vNES@result$Description <- "Downregulated Day 28 vs NES"
+NDDenrich_dwnD28vD5@result$Description <- "Downregulated Day 28 vs Day 5"
+
+NDDenrich_res <- as.data.frame(rbind(NDDenrich_C1@result, NDDenrich_C2@result, NDDenrich_C3@result, NDDenrich_C4@result, NDDenrich_upD28vNES@result, NDDenrich_upD28vD5@result, NDDenrich_upD5vNES@result, NDDenrich_dwnD28vNES@result, NDDenrich_dwnD28vD5@result))
+
+```
+
+#Linear RNA Differential Expression Analyses:
+
+```{r, eval=FALSE}
+#Analysis of corresponding linear RNA counts with DESeq2:
+
+#Import count matrix:
+linearRNA_counts <- read.delim("linearRNA_counts.txt", row.names=1)
+
+# Create colData object with cell and time point factors, where rows match columns (samples) of countdata:
+linRNA_colData <- as.data.frame(c(
+      rep("CTRL9II_NES", 4),
+      rep("CTRL9II_D5", 4),
+      rep("CTRL9II_D28", 3)),
+      row.names = colnames(linearRNA_counts)
+      )
+
+colnames(linRNA_colData) <- "Time"
+linRNA_colData$Time <- as.factor(linRNA_colData$Time)
+
+
+
+# Create DEseq object:
+ddsLinRNA <- DESeqDataSetFromMatrix(
+    countData = linearRNA_counts, 
+    colData = linRNA_colData, 
+    design = ~ Time
+)
+
+ddsLinRNA <- estimateSizeFactors(ddsLinRNA)
+idx <-rowSums( counts(ddsLinRNA, normalized=TRUE) >= 5 ) >= 3
+
+ddsLinRNA <- ddsLinRNA[idx,]
+
+
+#Run DEseq:
+ddsLinRNA <- DESeq(ddsLinRNA)
+
+#Get DEseq results + log fold change shrinkage results a
+linRNAres_D5vsNES <- results(ddsLinRNA, contrast = c("Time", "CTRL9II_D5", "CTRL9II_NES"))
+linRNAres_D5vsNES_s <- lfcShrink(ddsLinRNA, contrast = c("Time", "CTRL9II_D5", "CTRL9II_NES"), type = "ashr")
+linRNAres_D5vsNES_df <- as.data.frame(linRNAres_D5vsNES)
+linRNAres_D5vsNES_df$lfc_shrink <- linRNAres_D5vsNES_s$log2FoldChange
+linRNAres_D5vsNES_df$lfc_shrink_SE <- linRNAres_D5vsNES_s$lfcSE
+
+
+
+linRNAres_D28vsNES <- results(ddsLinRNA, contrast = c("Time", "CTRL9II_D28", "CTRL9II_NES"))
+linRNAres_D28vsNES_s <- lfcShrink(ddsLinRNA, contrast = c("Time", "CTRL9II_D28", "CTRL9II_NES"), type = "ashr")
+linRNAres_D28vsNES_df <- as.data.frame(linRNAres_D28vsNES)
+linRNAres_D28vsNES_df$lfc_shrink <- linRNAres_D28vsNES_s$log2FoldChange
+linRNAres_D28vsNES_df$lfc_shrink_SE <- linRNAres_D28vsNES_s$lfcSE
+
+linRNAres_D28vsD5 <- results(ddsLinRNA, contrast = c("Time", "CTRL9II_D28", "CTRL9II_D5"))
+linRNAres_D28vsD5_s <- lfcShrink(ddsLinRNA, contrast = c("Time", "CTRL9II_D28", "CTRL9II_D5"), type = "ashr")
+linRNAres_D28vsD5_df <- as.data.frame(linRNAres_D28vsD5)
+linRNAres_D28vsD5_df$lfc_shrink <- linRNAres_D28vsD5_s$log2FoldChange
+linRNAres_D28vsD5_df$lfc_shrink_SE <- linRNAres_D28vsD5_s$lfcSE
+
+
+#Subset significant DERs (using padj < 0.05 and lfc_shrink value >=2 or <= -2)
+upLinRNAsD5vNES <- linRNAres_D5vsNES_df[which(linRNAres_D5vsNES_df$lfc_shrink >= 2 & linRNAres_D5vsNES_df$padj <= 0.05), ]
+dwnLinRNAsD5vNES <- linRNAres_D5vsNES_df[which(linRNAres_D5vsNES_df$lfc_shrink <= -2 & linRNAres_D5vsNES_df$padj <= 0.05), ]
+
+upLinRNAsD28vNES <- linRNAres_D28vsNES_df[which(linRNAres_D28vsNES_df$lfc_shrink >= 2 & linRNAres_D28vsNES_df$padj <= 0.05), ]
+dwnLinRNAsD28vNES <- linRNAres_D28vsNES_df[which(linRNAres_D28vsNES_df$lfc_shrink <= -2 & linRNAres_D28vsNES_df$padj <= 0.05), ]
+
+upLinRNAsD28vD5 <- linRNAres_D28vsD5_df[which(linRNAres_D28vsD5_df$lfc_shrink >= 2 & linRNAres_D28vsD5_df$padj <= 0.05), ]
+dwnLinRNAsD28vD5 <- linRNAres_D28vsD5_df[which(linRNAres_D28vsD5_df$lfc_shrink <= -2 & linRNAres_D28vsD5_df$padj <= 0.05), ]
+
+# Combine all DERs:
+upLinRNAsD28vD5$ID <- rownames(upLinRNAsD28vD5)
+upLinRNAsD28vNES$ID <- rownames(upLinRNAsD28vNES)
+upLinRNAsD5vNES$ID <- rownames(upLinRNAsD5vNES)
+rownames(upLinRNAsD28vD5) <- NULL
+rownames(upLinRNAsD28vNES) <- NULL
+rownames(upLinRNAsD5vNES) <- NULL
+
+dwnLinRNAsD28vD5$ID <- rownames(dwnLinRNAsD28vD5)
+dwnLinRNAsD28vNES$ID <- rownames(dwnLinRNAsD28vNES)
+dwnLinRNAsD5vNES$ID <- rownames(dwnLinRNAsD5vNES)
+rownames(dwnLinRNAsD28vD5) <- NULL
+rownames(dwnLinRNAsD28vNES) <- NULL
+rownames(dwnLinRNAsD5vNES) <- NULL
+
+DERs <- rbind(upLinRNAsD28vD5, upLinRNAsD28vNES, upLinRNAsD5vNES, dwnLinRNAsD28vD5, dwnLinRNAsD28vNES, dwnLinRNAsD5vNES)
+DERs <- DERs$ID
+DERs <- unique(DERs)
+```
+
+##Linear RNA-level analysis of time-series use DESeq likelihood ratio test (LRT; comparble to an ANOVA):
+```{r, eval=FALSE}
+
+# Create copy of DESeqObject
+ddsLinRNA_LRT <- DESeqDataSetFromMatrix(
+    countData = linearRNA_counts, 
+    colData = linRNA_colData, 
+    design = ~ Time
+)
+
+ddsLinRNA_LRT <- estimateSizeFactors(ddsLinRNA_LRT)
+idx <-rowSums( counts(ddsLinRNA, normalized=TRUE) >= 5 ) >= 3
+
+ddsLinRNA_LRT <- ddsLinRNA_LRT[idx,]
+
+# LRT:
+ddsLinRNA_LRT <- DESeq(ddsLinRNA_LRT, test = "LRT", reduced = ~1)
+resLinRNA_LRT <- results(ddsLinRNA_LRT)
+
+
+# Perform pattern analysis using degPattern
+maLinRNA <- assay(rlog(ddsLinRNA_LRT))[which(resLinRNA_LRT$padj <0.05), ]
+designLinRNA <- as.data.frame(colData(ddsLinRNA_LRT))
+pattResLinRNA <- degPatterns(maLinRNA, designLinRNA, time = "Time")
+
+
+```
+
+##Pathway analysis of Linear RNAs with clusterProfiler - GO terms enriched in clusters
+```{r, eval=FALSE}
+
+# Enrichment analysis of clusters:
+backgroundLinRNA <- rownames(resLinRNA_LRT) # Generate 'background' gene list
+backgroundLinRNA <- unique(backgroundLinRNA)
+backgroundLinRNA <- as.data.frame(backgroundLinRNA)
+backgroundLinRNA <- backgroundLinRNA$backgroundLinRNA
+
+cluster1LinRNAs <- pattResLinRNA_df[which(pattResLinRNA_df$cluster == 1), ]
+cluster1LinRNAs <- cluster1LinRNAs$genes
+
+cluster2LinRNAs <- pattResLinRNA_df[which(pattResLinRNA_df$cluster == 2), ]
+cluster2LinRNAs <- cluster2LinRNAs$genes
+
+cluster3LinRNAs <- pattResLinRNA_df[which(pattResLinRNA_df$cluster == 3), ]
+cluster3LinRNAs <- cluster3LinRNAs$genes
+
+cluster4LinRNAs <- pattResLinRNA_df[which(pattResLinRNA_df$cluster == 4), ]
+cluster4LinRNAs <- cluster4LinRNAs$genes
+
+
+# Run EGO
+ego_C1linRNA <-enrichGO(
+                gene = cluster1LinRNAs,
+                universe = backgroundLinRNA,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+)
+
+# Run EGO
+ego_C2linRNA <-enrichGO(
+                gene = cluster2LinRNAs,
+                universe = backgroundLinRNA,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+)
+
+
+ego_C3linRNA <-enrichGO(
+                gene = cluster3LinRNAs,
+                universe = backgroundLinRNA,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+)
+
+ego_C4linRNA <-enrichGO(
+                gene = cluster4LinRNAs,
+                universe = backgroundLinRNA,
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+)
+
+```
+
+
+##Pathway analysis of linear RNAs with clusterProfiler - GO term Gene Set Enrichment analysis of pair-wise comparison:
+```{r, eval=FALSE}
+
+#D28vNES analysis
+linRNAres_D28vsNES_df$entrez <- with(GRCh37_IDs, entrez[match(rownames(linRNA <-_D28vsNES_df), ensembl)]) #Map entrez IDs
+linRNAres_D28vsNES_up <- linRNAres_D28vsNES_df[which(linRNAres_D28vsNES_df$lfc_shrink >0), ]
+D28vNES_linRNAlist_up <- linRNAres_D28vsNES_up$lfc_shrink
+names(D28vNES_linRNAlist_up) <- linRNAres_D28vsNES_up$entrez
+D28vNES_linRNAlist_up <- na.omit(D28vNES_linRNAlist_up)
+D28vNES_linRNAlist_up <- sort(D28vNES_linRNAlist_up, decreasing = TRUE)
+D28vNES_linRNA_gseGO_up <- gseGO(D28vNES_linRNAlist_up,
+                          ont = "BP",
+                          OrgDb = org.Hs.eg.db,
+                          keyType = "ENTREZID",
+                          pvalueCutoff = 0.1,
+                          scoreType = "pos",
+                          eps = 0
+                          )
+
+linRNAres_D28vsNES_dwn <- linRNAres_D28vsNES_df[which(linRNAres_D28vsNES_df$lfc_shrink <0), ]
+D28vNES_linRNAlist_dwn <- linRNAres_D28vsNES_dwn$lfc_shrink
+names(D28vNES_linRNAlist_dwn) <- linRNAres_D28vsNES_dwn$entrez
+D28vNES_linRNAlist_dwn <- na.omit(D28vNES_linRNAlist_dwn)
+D28vNES_linRNAlist_dwn <- sort(D28vNES_linRNAlist_dwn, decreasing = TRUE)
+D28vNES_linRNA_gseGO_dwn <- gseGO(D28vNES_linRNAlist_dwn,
+                          ont = "BP",
+                          OrgDb = org.Hs.eg.db,
+                          keyType = "ENTREZID",
+                          pvalueCutoff = 0.1,
+                          scoreType = "neg",
+                          eps = 0
+                          )
+
+
+#D28vD5 analysis
+linRNAres_D28vsD5_df$entrez <- with(GRCh37_IDs, entrez[match(rownames(linRNAres_D28vsD5_df), ensembl)]) #Map entrez IDs
+linRNAres_D28vsD5_up <- linRNAres_D28vsD5_df[which(linRNAres_D28vsD5_df$lfc_shrink >0), ]
+D28vD5_linRNAlist_up <- linRNAres_D28vsD5_up$lfc_shrink
+names(D28vD5_linRNAlist_up) <- linRNAres_D28vsD5_up$entrez
+D28vD5_linRNAlist_up <- na.omit(D28vD5_linRNAlist_up)
+D28vD5_linRNAlist_up <- sort(D28vD5_linRNAlist_up, decreasing = TRUE)
+D28vD5_linRNA_gseGO_up <- gseGO(D28vD5_linRNAlist_up,
+                          ont = "BP",
+                          OrgDb = org.Hs.eg.db,
+                          keyType = "ENTREZID",
+                          pvalueCutoff = 0.1,
+                          scoreType = "pos",
+                          eps = 0
+                          )
+
+linRNAres_D28vsD5_dwn <- linRNAres_D28vsD5_df[which(linRNAres_D28vsD5_df$lfc_shrink <0), ]
+D28vD5_linRNAlist_dwn <- linRNAres_D28vsD5_dwn$lfc_shrink
+names(D28vD5_linRNAlist_dwn) <- linRNAres_D28vsD5_dwn$entrez
+D28vD5_linRNAlist_dwn <- na.omit(D28vD5_linRNAlist_dwn)
+D28vD5_linRNAlist_dwn <- sort(D28vD5_linRNAlist_dwn, decreasing = TRUE)
+D28vD5_linRNA_gseGO_dwn <- gseGO(D28vD5_linRNAlist_dwn,
+                          ont = "BP",
+                          OrgDb = org.Hs.eg.db,
+                          keyType = "ENTREZID",
+                          pvalueCutoff = 0.1,
+                          scoreType = "neg"
+                          )
+
+
+#D5vNES
+linRNAres_D5vsNES_df$entrez <- with(GRCh37_IDs, entrez[match(rownames(linRNAres_D5vsNES_df), ensembl)]) #Map entrez IDs
+linRNAres_D5vsNES_up <- linRNAres_D5vsNES_df[which(linRNAres_D5vsNES_df$lfc_shrink >0), ]
+D5vNES_linRNAlist_up <- linRNAres_D5vsNES_up$lfc_shrink
+names(D5vNES_linRNAlist_up) <- linRNAres_D5vsNES_up$entrez
+D5vNES_linRNAlist_up <- na.omit(D5vNES_linRNAlist_up)
+D5vNES_linRNAlist_up <- sort(D5vNES_linRNAlist_up, decreasing = TRUE)
+D5vNES_linRNA_gseGO_up <- gseGO(D5vNES_linRNAlist_up,
+                          ont = "BP",
+                          OrgDb = org.Hs.eg.db,
+                          keyType = "ENTREZID",
+                          pvalueCutoff = 0.1,
+                          scoreType = "pos",
+                          eps = 0
+                          )
+
+linRNAres_D5vsNES_dwn <- linRNAres_D5vsNES_df[which(linRNAres_D5vsNES_df$lfc_shrink <0), ]
+D5vNES_linRNAlist_dwn <- linRNAres_D5vsNES_dwn$lfc_shrink
+names(D5vNES_linRNAlist_dwn) <- linRNAres_D5vsNES_dwn$entrez
+D5vNES_linRNAlist_dwn <- na.omit(D5vNES_linRNAlist_dwn)
+D5vNES_linRNAlist_dwn <- sort(D5vNES_linRNAlist_dwn, decreasing = TRUE)
+D5vNES_linRNA_gseGO_dwn <- gseGO(D5vNES_linRNAlist_dwn,
+                          ont = "BP",
+                          OrgDb = org.Hs.eg.db,
+                          keyType = "ENTREZID",
+                          pvalueCutoff = 0.1,
+                          scoreType = "neg"
+                          )
+
+```
+
+##Correlation Analysis of circRNA and linear RNA expression
+```{r, eval=FALSE}
+
+#D28vNES
+res_D28vNES_df$ensembl <- with(GRCh37_IDs, ensembl[match(res_D28vNES_df$symbol, symbol)])
+res_D28vNES_df$id <- rownames(res_D28vNES_df)
+D28vNES_lfcCorr <- res_D28vNES_df[,c(12,11,7:8)]
+rownames(D28vNES_lfcCorr) <- NULL
+colnames(D28vNES_lfcCorr) <- c("id", "ensembl", "circRNA", "circRNA_SE")
+linRNAres_D28vsNES_df$ensembl <- rownames(linRNAres_D28vsNES_df)
+D28vNES_lfcCorr$hostRNA <-  with(linRNAres_D28vsNES_df, lfc_shrink[match(D28vNES_lfcCorr$ensembl, ensembl)])
+D28vNES_lfcCorr$hostRNA_SE <-  with(linRNAres_D28vsNES_df, lfc_shrink_SE[match(D28vNES_lfcCorr$ensembl, ensembl)])
+
+D28vNES_lfcCorr_plot <- ggscatter(D28vNES_lfcCorr,
+                 x = 'circRNA',
+                 y = 'hostRNA',
+                 add = "reg.line",
+                 conf.int = TRUE,
+                 cor.coef = TRUE,
+                 cor.method = "pearson",
+                 xlab = "host lfc-shrink",
+                 ylab = "circRNA lfc-shrink",
+                 title = "Day 28 vs NES lfc-shrink correlation",
+                 size = 1
+                 )
+
+```
+
+#Analysis of Differential Exon Usage 
+```{r}
+#Load exon count data:
+exonCounts = read.table("exonCounts.txt")
+#Filter for exons which have five or more reads in at least 3 samples 
+exonCounts_filt = exonCounts[apply(exonCounts,1,function(x){sum(x>=5)})>2,]
+
+#Create table with sample info:
+sampleTable = data.frame(
+   sample = c("CTRL9_D0_2", "CTRL9_D0_3", "CTRL9_D0_4", "CTRL9_D0_5", "CTRL9_D28_1", "CTRL9_D28_2", "CTRL9_D28_3"),
+   condition = c("D0", "D0", "D0", "D0", "D28", "D28", "D28"))
+
+#Load flattened gff file (created as described in DEXseq manual):
+flattenedFile = read.delim("DEXseq.gff", header=FALSE)
+
+#Create DEX object:
+dxd = DEXSeqDataSetFromHTSeq(
+   countFiles,
+   sampleData=sampleTable,
+   design= ~ sample + exon + condition:exon,
+   flattenedfile=flattenedFile )
+
+
+#Perform DEXSeq with default settings:
+dxd = estimateSizeFactors(dxd)
+dxd = estimateDispersions(dxd)
+dxd = testForDEU(dxd)
+dxd = estimateExonFoldChanges(dxd, fitExpToVar="condition")
+
+dxrRes = DEXSeqResults(dxd) #Extract results
+
+dxrRes_df <- as.data.frame(dxrRes) #make data frame with results
+dxrRes_df$id <- rownames(dxrRes_df) #Add column with ID
+
+#Filter for genes with only one exon
+dxrRes_df <- dxrRes_df %>% group_by(groupID) %>% mutate(exonCount=n())
+dxrRes_df <- dxrRes_df[which(dxrRes_df$exonCount >1),]
+
+dxrRes_df2 = dxrRes_df[which(dxrRes_df$padj != "NA"),] #Remove those where padj is NA
+dxrRes_df2 = dxrRes_df2[which(dxrRes_df2$exonBaseMean > 10),] #Filter low read exons
+
+#Subset differentially used exons:
+UpExons = dxrRes_df2[which(dxrRes_df2$padj < 0.05 & dxrRes_df2$log2fold_D28_D0 >=2),]
+DwnExons = dxrRes_df2[which(dxrRes_df2$padj < 0.05 & dxrRes_df2$log2fold_D28_D0 <=-2),]
+DUexons = rbind(UpExons, DwnExons) #combine
+DUexons$geneSymbol <- with(GRCh37_IDs, symbol[match(DUexons$groupID, ensembl)]) #map IDs
+
+#Subset alternatively spliced RNAs (log2FoldChange <= -2 or >= 2 & padj < 0.05)
+altSplice_D28vNES <- dxrRes_df2[which(dxrRes_df2$padj < 0.05 & dxrRes_df2$log2fold_D28_D0 >= 1 | dxrRes_df2$padj < 0.05 & dxrRes_df2$log2fold_D28_D0 <= -1),] 
+altSplice_D28vNES$geneSymbol <- with(GRCh37_IDs, symbol[match(altSplice_D28vNES$groupID, ensembl)]) #Map gene symbols
+
+#Create df of genes which are alterantively spliced (at least one significantly dysregulated exon)
+altSplice_RNAs_D28vNES <- altSplice_D28vNES[,c(1,26,25)]
+rownames(altSplice_RNAs_D28vNES) <- NULL
+altSplice_RNAs_D28vNES <- unique(altSplice_RNAs_D28vNES)
+
+#Calculate number of alt. spliced RNA/alt. spliced host RNAs:
+RNAno <- length(unique(dxrRes_df$groupID)) #total no. of RNAs
+altSpliceRNAno <- length(intersect(altSplice_RNAs_D28vNES$groupID, unique(dxrRes_df$groupID))) #number of alt.splice RNAs
+circHostRNAno <- length(unique(res_D28vNES_df$ensembl)) #total number of host RNAs
+altSpliceCircHostNo <- length(intersect(altSplice_RNAs_D28vNES$groupID, unique(res_D28vNES_df$ensembl))) #no. of alt. spliced host RNAs
+UpD28_circHostRNAno <- length(unique(upD28vNES$ensembl)) #number of host RNAs of circRNAs up at D28vNES
+UpD28_altSplCircHostNo <- length(intersect(altSplice_RNAs_D28vNES$groupID, unique(upD28vNES$ensembl))) #number of alt. spliced upD28vNES host RNAs
+
+
+
+altSplRNAper <- altSpliceRNAno/RNAno * 100 #Calculate percentage of RNAs alt. spliced
+altSplHostRNAper <- altSpliceCircHostNo/circHostRNAno * 100 #Calculate percentage of circRNA hosts that are alt. spliced
+upD28_altSplHostRNAper <- UpD28_altSplCircHostNo/UpD28_circHostRNAno * 100 #Calculate percentage of upD28vNES circRNA hosts that are alt. spliced
+
+#Test for enrichment (hypergeometric p-value test)
+phyper(altSpliceCircHostNo-1, altSpliceRNAno, RNAno - altSpliceRNAno, circHostRNAno, lower.tail = FALSE) #compare all RNAs and circHosts
+phyper(UpD28_altSplCircHostNo-1, altSpliceCircHostNo, circHostRNAno - altSpliceCircHostNo, UpD28_circHostRNAno, lower.tail = FALSE) #compare circ Hosts and upD28 circ Hosts
+phyper(UpD28_altSplCircHostNo-1, altSpliceRNAno, RNAno- altSpliceRNAno, UpD28_circHostRNAno, lower.tail = FALSE) #compare upD28 circHosts and all RNAs
+
+#Find GO terms associated with alternativly spliced genes
+#Run Cluster profiler EGO:
+ego_altSplc <- enrichGO(
+                gene = altSplice_RNAs_D28vNES$groupID,
+                universe = unique(dxrRes_df$groupID),
+                keyType = "ENSEMBL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                qvalueCutoff = 0.05,
+                readable = TRUE
+)
+
+
+```
+
+
+##Correlation of sifnificantly upregulated circRNAs only (D28vNES)
+```{r, eval=FALSE}
+
+D28vNES_lfcCorr$FCdiff <- D28vNES_lfcCorr$circRNA - D28vNES_lfcCorr$hostRNA
+upD28vNES_SpecReg <- D28vNES_lfcCorr[which(D28vNES_lfcCorr$id %in% rownames(upD28vNES)),]
+
+#Create dataframe with host RNA lfc and corresponding lfc of circRNAs upregulated at D28vNES
+upD28vNES_lfcCorr <- upD28vNES[,c(9,11,7:8)]
+colnames(upD28vNES_lfcCorr) <- c("id", "ensembl", "circRNA", "circRNA_SE")
+linRNAres_D28vsNES_df$ensembl <- rownames(linRNAres_D28vsNES_df)
+upD28vNES_lfcCorr$hostRNA <-  with(linRNAres_D28vsNES_df, lfc_shrink[match(upD28vNES_lfcCorr$ensembl, ensembl)])
+upD28vNES_lfcCorr$hostRNA_SE <-  with(linRNAres_D28vsNES_df, lfc_shrink_SE[match(upD28vNES_lfcCorr$ensembl, ensembl)])
+
+#ggpubr function ggscatter calculates correlation and plots data:
+upD28vNES_lfcCorr_plot = ggscatter(upD28vNES_lfcCorr,
+                 x = 'circRNA',
+                 y = 'hostRNA',
+                 add = "reg.line",
+                 conf.int = TRUE,
+                 cor.coef = TRUE,
+                 cor.method = "pearson",
+                 xlab = "host lfc-shrink",
+                 ylab = "circRNA lfc-shrink",
+                 title = "circRNAs Upregulated Day 28 vs NES",
+                 size = 1
+                 )
+
+
+#Compare directly top 20 
+upD28vNES_lfcTop <- upD28vNES[,c(9:11,7:8)]
+colnames(upD28vNES_lfcCorr) <- c("id","symbol", "ensembl", "circRNA", "circRNA_SE")
+upD28vNES_lfcTop <- upD28vNES_lfcTop[order(-upD28vNES_lfcTop$lfc_shrink),]
+upD28vNES_lfcTop <- upD28vNES_lfcTop[c(1:20),]
+upD28vNES_lfcTop$circID <- paste0("circ", upD28vNES_lfcTop$symbol)
+upD28vNES_lfcTop$circID <- make.unique(as.character(upD28vNES_lfcTop$circID), sep = "_")
+upD28vNES_lfcTop$circID <- gsub("_1", "_b", upD28vNES_lfcTop$circID)
+upD28vNES_lfcTop$circID <- gsub("_2", "_c", upD28vNES_lfcTop$circID)
+upD28vNES_lfcTop$circID<- factor(upD28vNES_lfcTop$circID, levels = upD28vNES_lfcTop$circID)
+upD28vNES_lfcTop$hostRNA_lfc <-  with(linRNAres_D28vsNES_df, lfc_shrink[match(upD28vNES_lfcTop$ensembl, ensembl)])
+upD28vNES_lfcTop$hostRNA_SE <-  with(linRNAres_D28vsNES_df, lfc_shrink_SE[match(upD28vNES_lfcTop$ensembl, ensembl)])
+upD28vNES_lfcTop <- upD28vNES_lfcTop[,c(6,4:5,7:8)]
+colnames(upD28vNES_lfcTop) <- c("circID", "circRNA_lfc", "circRNA_SE","hostRNA_lfc", "hostRNA_SE")
+
+upD28vNES_lfcTop <- upD28vNES_lfcTop %>% gather(lfc, value, -circID) %>% separate(lfc, c("lfc_group", "temp_var")) %>% spread(temp_var, value)
+
+```
+
+##Correlation of Exon and circRNA LFC values
+```{r, eval=FALSE}
+#Create BED file of diferentially used exons D28vNES:
+ExonGff <- flattenedFile[which(flattenedFile$V3 == "exonic_part"),]
+ExonGff$GroupID <- word(ExonGff$V9,1, sep = ";")
+ExonGff$GroupID <- gsub("gene_id ", "", ExonGff$GroupID)
+ExonGff$FeatureID <- word(ExonGff$V9,3, sep = ";")
+ExonGff$FeatureID <- gsub(" exonic_part_number ", "E", ExonGff$FeatureID)
+ExonGff$chrom <- paste0("chr", ExonGff$V1)
+ExonGff$id <- paste0(ExonGff$GroupID, ":", ExonGff$FeatureID)
+ExonGff$start <- ExonGff$V4
+ExonGff$end <- ExonGff$V5
+ExonGff$strand <- ExonGff$V7
+ExonGff <- ExonGff[,c(10:12,14,15,13,16)]
+
+  
+DUexons_D28vNES <- ExonGff[which(ExonGff$id %in% rownames(DUexons)),3:7]
+rownames(DUexons_D28vNES) = NULL
+DUexons_D28vNES$score <- rep(".", length(DUexons_D28vNES$strand))
+DUexons_D28vNES <- DUexons_D28vNES[,c(1:4,6,5)]
+write.table(DUexons_D28vNES, "DUexons_D28vNES.bed", sep = "\t", row.names = FALSE, quote = FALSE, col.names = FALSE)
+
+#Create BED file of all exons analysed for differential usage:
+allDxrExons <- ExonGff[which(ExonGff$id %in% dxrRes_df$id),3:7]
+allDxrExons$score <- rep(".", length(allDxrExons$strand))
+allDxrExons <- allDxrExons[,c(1:4,6,5)]
+write.table(allDxrExons, "allDxrExons.bed", sep = "\t", row.names = FALSE, quote = FALSE, col.names = FALSE)
+
+#Find LFC correlations between circRNAs and exons
+#Load circExonIntersect file (see Variant analysis for more info)
+exonCirc_LFC_Ref <- read.delim("circExonIntersect.bed", header=FALSE)
+exonCirc_LFC_Ref <- exonCirc_LFC_Ref[,c(10,4)] #subset
+colnames(exonCirc_LFC_Ref) <- c("exonPos", "circID")
+exonCirc_LFC_Ref$circLFC <- with(res_D28vNES_df, lfc_shrink[match(exonCirc_LFC_Ref$circID, rownames(res_D28vNES_df))]) #map LFC values
+
+#Use bedtools intersect to overlap DEXseq exon regions with circRNA regions:
+#See Variant analysis for creation of circExons.bed file
+#bedtools intersect -wa -wb -a allDxrExons.bed -b circExons.bed > all_circExons.txt 
+
+#Load result:
+all_circExons <- read.delim("all_circExons.txt", header=FALSE)
+all_circExons$exonLFC <- with(dxrRes_df, log2fold_D28_D0[match(all_circExons$V4, dxrRes_df$id)])
+exonCirc_LFC_Ref$exonLFC <- with(all_circExons, exonLFC[match(exonCirc_LFC_Ref$exonPos, V10)])
+exonCirc_LFC_Ref <- exonCirc_LFC_Ref %>% group_by(exonPos) %>% mutate(meanCircLFC=mean(circLFC))
+exonCirc_LFC_Ref <- exonCirc_LFC_Ref %>% group_by(exonPos) %>% mutate(meanExonLFC=mean(exonLFC))
+exonCirc_LFC_Ref <- unique(exonCirc_LFC_Ref[,c(1,5:6)])
+
+#Calculate pearson correlation
+circExonLfcCorr_plot <- ggscatter(exonCirc_LFC_Ref,
+                 x = 'meanCircLFC',
+                 y = 'meanExonLFC',
+                 add = "reg.line",
+                 conf.int = TRUE,
+                 cor.coef = TRUE,
+                 cor.method = "pearson",
+                 title = "Day 28 vs NES circRNA-Exon lfc correlation",
+                 size = 1
+                 )
+circExonLfcCorr_plot
+
+```
+
