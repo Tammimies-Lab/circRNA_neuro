@@ -830,7 +830,7 @@ ego_C4linRNA <-enrichGO(
 ```{r, eval=FALSE}
 
 #D28vNES analysis
-linRNAres_D28vsNES_df$entrez <- with(GRCh37_IDs, entrez[match(rownames(linRNA <-_D28vsNES_df), ensembl)]) #Map entrez IDs
+linRNAres_D28vsNES_df$entrez <- with(GRCh37_IDs, entrez[match(rownames(linRNAres_D28vsNES_df), ensembl)]) #Map entrez IDs
 linRNAres_D28vsNES_up <- linRNAres_D28vsNES_df[which(linRNAres_D28vsNES_df$lfc_shrink >0), ]
 D28vNES_linRNAlist_up <- linRNAres_D28vsNES_up$lfc_shrink
 names(D28vNES_linRNAlist_up) <- linRNAres_D28vsNES_up$entrez
