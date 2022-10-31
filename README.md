@@ -11,3 +11,17 @@ Michelle Watts (1,2), Marika Oksanen (1,2,3), Sanna Lejerkrans (1,2), Francesca 
 Correspondence: [kristiina.tammimies@ki.se](mailto:kristiina.tammimies@ki.se)
 
 **Currently available as a preprint at bioRxiv DOI: [10.1101/2022.10.05.510949](https://doi.org/10.1101/2022.10.05.510949)**
+
+
+
+### This resource is divided into the following three subdirectories:
+
+#### 1. Differential Expression and Exon Usage Analysis
+Here you will find raw count files for circRNAs (reads spanning back-spliced junctions), linear RNAs, and exons.
+The R markdown file includes all codes used for differential expression/exon usage analysis as well as gene ontology and correlative analyses.
+
+#### 2. Viariant Analysis
+This directory contains code and data files used to analyse variants in circRNA-forming exons.
+
+#### 3. Intron Analysis
+Code and data required for analysis of circRNA flanking introns can be found in this directory.
