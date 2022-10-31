@@ -14,7 +14,7 @@ Correspondence: [kristiina.tammimies@ki.se](mailto:kristiina.tammimies@ki.se)
 
 
 
-### This resource is divided into the following three subdirectories:
+### This resource is divided into the following sub-directories:
 
 #### 1. Differential Expression and Exon Usage Analysis
 Here you will find raw count files for circRNAs (reads spanning back-spliced junctions), linear RNAs, and exons.
