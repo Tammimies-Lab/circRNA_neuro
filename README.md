@@ -1,6 +1,6 @@
 # circRNA_neuro
 In this repository you will find  source code and data sets related to our manuscript:
-## Circular RNAs arising from synaptic host genes are modulated by SFPQ RNA-binding protein and increased during human neuronal differentiation
+## Circular RNAs arising from synaptic host genes during human neuronal differentiation are modulated by SFPQ RNA-binding protein
 
 Michelle Watts (1,2), Marika Oksanen (1,2,3), Sanna Lejerkrans (1,2), Francesca Mastropasqua (1,2), Myriam Gorospe (3) and Kristiina Tammimies (1,2)
 
