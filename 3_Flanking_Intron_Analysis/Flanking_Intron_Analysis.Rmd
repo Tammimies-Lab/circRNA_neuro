@@ -1,0 +1,1203 @@
+---
+title: "Flanking Intron Analysis"
+author: "MW"
+editor_options:
+  chunk_output_type: console
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  bookdown::html_document2:
+    code_folding: show
+    toc: yes
+    toc_float:
+      collapsed: no
+params:
+  dataset: 1
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      results = "hold",
+                      message = FALSE,
+                      warning = FALSE)
+```
+
+## Analysis of circRNA flanking introns
+
+## Load packages
+
+```{r}
+library("GenomicRanges")
+library("seqRFLP")
+library("BSgenome.Hsapiens.UCSC.hg19")
+library("BSgenome")
+library("plotrix")
+library("rstatix")
+library("BSDA")
+library("data.table")
+library("stats")
+library("pwr")
+library("biomaRt")
+library("plyr")
+library("ggplot2")
+library("ggpubr")
+```
+
+##Extract Flanking Intron Seqeunces
+```{r}
+#load data
+annotatedCirc <- read.delim("annotatedCirc.txt")
+
+#load genome
+genome <- BSgenome::getBSgenome("BSgenome.Hsapiens.UCSC.hg19")
+
+
+#Subset annotated circ dataframe into upstream and downstream intron positions:
+upIntrons <- annotatedCirc
+upIntrons <- subset(upIntrons, !transcript == "NA")
+upIntrons$intronId <- paste(upIntrons$id, "upInt", sep = "_")
+upIntrons <- upIntrons[,c(1,26,7,6,8,9)]
+
+#Fix formatting so that start is > stop for introns on the '-' strand as well:
+upIntrons_a <- subset(upIntrons, strand == "+")
+colnames(upIntrons_a) <- c("id", "intronID", "chrom", "strand", "start", "stop")
+upIntrons_b <- subset(upIntrons, strand == "-") #Fix formatting so that start is > stop for introns on the '-' strand as well
+colnames(upIntrons_b) <- c("id", "intronID", "chrom", "strand", "stop", "start")
+upIntrons <- rbind(upIntrons_a, upIntrons_b)
+rm(upIntrons_a, upIntrons_b)
+
+#Remove introns without annotations:
+upIntrons <- subset(upIntrons, !start == "NA")
+
+#Repeat steps for downstream flanking introns:
+dwnIntrons <- annotatedCirc
+dwnIntrons <- subset(dwnIntrons, !transcript == "NA")
+dwnIntrons$intronId <- paste(dwnIntrons$id, "dwnInt", sep = "_")
+dwnIntrons <- dwnIntrons[,c(1,26,7,6,14,15)]
+dwnIntrons_a <- subset(dwnIntrons, strand == "+")
+colnames(dwnIntrons_a) <- c("id", "intronID", "chrom", "strand", "start", "stop")
+dwnIntrons_b <- subset(dwnIntrons, strand == "-")
+colnames(dwnIntrons_b) <- c("id", "intronID", "chrom", "strand", "stop", "start")
+dwnIntrons <- rbind(dwnIntrons_a, dwnIntrons_b)
+rm(dwnIntrons_a, dwnIntrons_b)
+dwnIntrons <- subset(dwnIntrons, !start == "NA")
+
+#Get sequences for up introns for background set:
+upIntrons_gr <- makeGRangesFromDataFrame(upIntrons) #Make into GRanges object
+upIntron_seqs <- getSeq(genome, upIntrons_gr, as.character=TRUE) #Extract intron seqeunces using BSgenome loaded previously
+#Create Fasta file
+upIntron_seqs <- as.data.frame(upIntron_seqs)
+colnames(upIntron_seqs) <- "seqs"
+upIntron_seqs$id <- upIntrons$intronID
+upIntron_seqs <- upIntron_seqs[,c(2,1)]
+upIntrons_fasta <- dataframe2fas(upIntron_seqs, "upIntrons.fasta")
+
+#Get sequences for down introns for background set:
+dwnIntrons_gr <- makeGRangesFromDataFrame(dwnIntrons) #Make into GRanges object
+dwnIntron_seqs <- getSeq(genome, dwnIntrons_gr, as.character=TRUE) #Extract intron seqeunces using BSgenome loaded previously
+#Create Fasta file
+dwnIntron_seqs <- as.data.frame(dwnIntron_seqs)
+colnames(dwnIntron_seqs) <- "seqs"
+dwnIntron_seqs$id <- dwnIntrons$intronID
+dwnIntron_seqs <- dwnIntron_seqs[,c(2,1)]
+dwnIntrons_fasta <- dataframe2fas(dwnIntron_seqs, "dwnIntrons.fasta")
+
+#Create list of all introns flanking circRNAs
+flankingIntrons <- rbind(upIntrons, dwnIntrons)
+
+```
+##Extract all introns in circRNA-forming genes/transcripts:
+```{r}
+#load biomart:
+ensemblGRCh37 <- useEnsembl(biomart = 'genes', dataset = 'hsapiens_gene_ensembl', version = "GRCh37")
+
+hostTranscripts <- unique(annotatedCirc$transcript) #list of circ-forming genes(transcript=longest transcript containing the/all circularized exon/s)
+
+#Extract info on transcript start and stop sites and exon start and stop sites for each transcript
+hostInfo <- getBM(attributes = c('ensembl_transcript_id', 'chromosome_name', 'strand', 'transcript_start','transcript_end', 'ensembl_exon_id', 'exon_chrom_start', 'exon_chrom_end'),
+                 filters = 'ensembl_transcript_id',
+                 values = hostTranscripts,
+                 mart = ensemblGRCh37)
+
+#Create bed files for transcript and exon info:
+hostInfo$score <- rep(".", length(hostInfo$ensembl_transcript_id)) #make score column
+hostInfo$strand <- gsub("-1", "-", hostInfo$strand) #convert to standard strand expression
+hostInfo$strand <- gsub("1", "+", hostInfo$strand) #convert to standard strand expression
+
+#Subset exon position info to bed format:
+exonBed <- unique(hostInfo[,c(2,7,8,6,9,3)])
+write.table(exonBed, file = "hostExons.bed", quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE) #save
+#Subset transcript position info to bed format:
+transcriptBed <- unique(hostInfo[,c(2,4,5,1,9,3)])
+write.table(transcriptBed, file = "hostTranscripts.bed", quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE) #save
+
+#Create bed for all flanking introns:
+flankingIntrons$score <- rep(".", length(flankingIntrons$id)) #make score column
+flankingIntrons$chrom <- gsub("chr","", flankingIntrons$chrom)
+flankIntBed <- flankingIntrons[,c(3,5,6,2,7,4)] #Subset intron position info to bed format:
+write.table(flankIntBed, "flankingIntrons.bed", quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE) #save
+
+
+```
+
+```{bash}
+bedtools sort -i hostExons.bed > hostExons.sort.bed #sort bed file
+bedtools merge -i hostExons.sort.bed -c 4,5,6 -o collapse,distinct,distinct -s > hostExonsMerge.bed #To remove potential redundancy is removed by using merge to collapse overlapping and book-ended exons in stand-specific manner (-s)  
+bedtools sort -i hostTranscripts.bed > hostTranscripts.sort.bed #sort bed file
+bedtools subtract -a hostTranscripts.sort.bed -b hostExonsMerge.bed -s > hostIntrons.bed #Intron positions are found by subtracting (merged) exon position from transcript regions.
+bedtools sort -i flankingIntrons.bed > flankingIntrons.sort.bed #sort bed file
+bedtools subtract -a hostIntrons.bed -b flankingIntrons.sort.bed -s -A > nonFlnkIntrons.bed
+#Subtract introns which flank circRNAs from all host introns -A options removes all features in -a with any overlap in -b.
+
+```
+
+##Analyse intron length flanking and non flanking
+```{r}
+hostIntrons <- read.delim("./hostIntrons.bed", header = FALSE)
+nonFlnkIntrons <- read.delim("./nonFlnkIntrons.bed", header = FALSE)
+
+
+nonFlnkIntrons$intLength <- nonFlnkIntrons$V3 - nonFlnkIntrons$V2
+nonFlnkIntrons$group <- rep("nonFlnkInt", length(nonFlnkIntrons$V1))
+nonFlnkIntLen <- nonFlnkIntrons[,c(8,7)]
+
+hostIntrons$intLength <- hostIntrons$V3 - hostIntrons$V2
+hostIntrons$group <- rep("hostInt", length(hostIntrons$V1))
+hostIntLen <- hostIntrons[,c(8,7)]
+
+flankingIntrons$intLength <- flankingIntrons$stop - flankingIntrons$start
+flankingIntrons$group <- rep("flankingInt", length(flankingIntrons$id))
+flankingIntLen <- flankingIntrons[,c(9,8)]
+
+
+
+#Compare mean intron Length of all host RNA introns with circRNA flanking introns:
+
+z.test(x=as.numeric(hostIntLen$intLength), sigma.x=sd(as.numeric(hostIntLen$intLength)), y=as.numeric(flankingIntLen$intLength), sigma.y=sd(as.numeric(flankingIntLen$intLength)))
+
+hostVflnk_intlength_Data <- rbind(hostIntLen, flankingIntLen)
+write.table(hostVflnk_intlength_Data, "hostVflnk_intlength.txt", quote = FALSE, row.names = FALSE)
+
+#Density plots 
+flnkLenComp <- rbind(hostIntLen, flankingIntLen)
+flc <- ddply(flnkLenComp , "group", summarise, grp.med=median(intLength), grp.mean=mean(intLength), grp.se=std.error(intLength))
+flc$group <- factor(flc$group, levels = c("hostInt", "flankingInt"))
+
+densPlot_flc <- ggplot(flnkLenComp, aes(x=intLength, color=group, fill=group)) + geom_density(alpha=0.2, size = 0.5) + geom_vline(data=flc, aes(xintercept=grp.med, color=group), linetype="dashed", size=0.5) + scale_x_log10() + labs(x="Intron length (Log10(nts))", y="Density") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "gray", size = 0.1),panel.grid.minor = element_blank(), panel.border = element_rect(fill=NA, colour = "darkgray", size = 0.5), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.text = element_text(family = "Helvetica", colour = "black", size = 7), axis.title = element_text(family = "Helvetica", colour = "black", size = 9), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("purple3","gray40")) + scale_fill_manual(values=c("purple3","gray40"))
+densPlot_flc
+
+#Bar plot of mean and standard error
+barPlot_flc <- ggplot(flc, aes(x=group, y=grp.mean, color=group, fill=group)) + geom_bar(stat = "identity", alpha=0.2, size=0.3, width = 0.7) + labs(y="Intron length (nts)") + geom_errorbar(aes(ymin=grp.mean-grp.se, ymax=grp.mean+grp.se), width=0.4, size = 0.5) + theme(panel.background = element_blank(), panel.grid = element_blank(), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.line = element_line(colour = "darkgray", size = 0.5), axis.text.y = element_text(family = "Helvetica", colour = "black", size = 7), axis.text.x = element_text(family = "Helvetica", colour = "black", size = 11, angle = 45, vjust = 1, hjust = 1), axis.title.y = element_text(family = "Helvetica", colour = "black", size = 9, face = "bold"), axis.title.x = element_blank(), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("gray40", "purple3")) + scale_fill_manual(values=c("gray40", "purple3")) + scale_y_continuous(expand=c(0,0,0.1,0)) 
+barPlot_flc 
+
+
+#Compare mean intron Length of all host RNA introns with non-circRNA flanking introns:
+
+z.test(x=as.numeric(hostIntLen$intLength), sigma.x=sd(as.numeric(hostIntLen$intLength)), y=as.numeric(nonFlnkIntLen$intLength), sigma.y=sd(as.numeric(nonFlnkIntLen$intLength)))
+
+
+hostVnonFlnk_intlength_Data <- rbind(hostIntLen, nonFlnkIntLen)
+write.table(hostVnonFlnk_intlength_Data, "hostVnonFlnk_intlength.txt", quote = FALSE, row.names = FALSE)
+
+
+#Density plots 
+nonflnkLenComp <- rbind(hostIntLen, nonFlnkIntLen)
+nflc <- ddply(nonflnkLenComp , "group", summarise, grp.med=median(intLength), grp.mean=mean(intLength), grp.se=std.error(intLength))
+nflc$group <- factor(nflc$group, levels = c("hostInt", "nonFlnkInt"))
+
+densPlot_nflc <- ggplot(nonflnkLenComp, aes(x=intLength, color=group, fill=group)) + geom_density(alpha=0.2, size = 0.5) + geom_vline(data=nflc, aes(xintercept=grp.med, color=group), linetype="dashed", size=0.5) + scale_x_log10() + labs(x="Intron length (Log10(nts))", y="Density") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "gray", size = 0.1),panel.grid.minor = element_blank(), panel.border = element_rect(fill=NA, colour = "darkgray", size = 0.5), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.text = element_text(family = "Helvetica", colour = "black", size = 7), axis.title = element_text(family = "Helvetica", colour = "black", size = 9), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("gray40", "orange")) + scale_fill_manual(values=c("gray40", "orange"))
+densPlot_nflc
+
+#Bar plot of mean and standard error
+barPlot_nflc <- ggplot(nflc, aes(x=group, y=grp.mean, color=group, fill=group)) + geom_bar(stat = "identity", alpha=0.2, size=0.3, width = 0.7) + labs(y="Intron length (nts)") + geom_errorbar(aes(ymin=grp.mean-grp.se, ymax=grp.mean+grp.se), width=0.4, size = 0.5) + theme(panel.background = element_blank(), panel.grid = element_blank(), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.line = element_line(colour = "darkgray", size = 0.5), axis.text.y = element_text(family = "Helvetica", colour = "black", size = 7), axis.text.x = element_text(family = "Helvetica", colour = "black", size = 11, angle = 45, vjust = 1, hjust = 1), axis.title.y = element_text(family = "Helvetica", colour = "black", size = 9, face = "bold"), axis.title.x = element_blank(), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("gray40", "orange")) + scale_fill_manual(values=c("gray40", "orange")) + scale_y_continuous(expand=c(0,0,0.1,0)) 
+barPlot_nflc 
+
+ggarrange(barPlot_flc, barPlot_nflc, common.legend = FALSE, legend = "right")
+```
+
+
+##Subset and extract seqs for flanking introns of differentially regulated circRNAs:
+```{r}
+#upD28vNES upstream flanking intons:
+upD28vNES_upInts <- upIntrons[which(upIntrons$id %in% upD28vNES$id),]
+upD28vNES_upInts_gr <- makeGRangesFromDataFrame(upD28vNES_upInts)
+upD28vNES_upInts_seqs <- getSeq(genome, upD28vNES_upInts_gr, as.character=TRUE)
+upD28vNES_upInts_seqs <- as.data.frame(upD28vNES_upInts_seqs)
+colnames(upD28vNES_upInts_seqs) <- "seqs"
+upD28vNES_upInts_seqs$id <- upD28vNES_upInts$intronID
+upD28vNES_upInts_seqs <- upD28vNES_upInts_seqs[,c(2,1)]
+upD28vNES_upInts_fasta <- dataframe2fas(upD28vNES_upInts_seqs, "upD28vNES_upInts.fasta")
+#upD28vNES downstream flanking intons:
+upD28vNES_dwnInts <- dwnIntrons[which(dwnIntrons$id %in% upD28vNES$id),]
+upD28vNES_dwnInts_gr <- makeGRangesFromDataFrame(upD28vNES_dwnInts)
+upD28vNES_dwnInts_seqs <- getSeq(genome, upD28vNES_dwnInts_gr, as.character=TRUE)
+upD28vNES_dwnInts_seqs <- as.data.frame(upD28vNES_dwnInts_seqs)
+colnames(upD28vNES_dwnInts_seqs) <- "seqs"
+upD28vNES_dwnInts_seqs$id <- upD28vNES_dwnInts$intronID
+upD28vNES_dwnInts_seqs <- upD28vNES_dwnInts_seqs[,c(2,1)]
+upD28vNES_dwnInts_fasta <- dataframe2fas(upD28vNES_dwnInts_seqs, "upD28vNES_dwnInts.fasta")
+rm(upD28vNES_dwnInts_fasta)
+
+#upD28vNES upstream flanking intons:
+upD28vNES_upInts <- upIntrons[which(upIntrons$id %in% upD28vNES$id),]
+upD28vNES_upInts_gr <- makeGRangesFromDataFrame(upD28vNES_upInts)
+upD28vNES_upInts_seqs <- getSeq(genome, upD28vNES_upInts_gr, as.character=TRUE)
+upD28vNES_upInts_seqs <- as.data.frame(upD28vNES_upInts_seqs)
+colnames(upD28vNES_upInts_seqs) <- "seqs"
+upD28vNES_upInts_seqs$id <- upD28vNES_upInts$intronID
+upD28vNES_upInts_seqs <- upD28vNES_upInts_seqs[,c(2,1)]
+upD28vNES_upInts_fasta <- dataframe2fas(upD28vNES_upInts_seqs, "upD28vNES_upInts.fasta")
+#upD28vNES downstream flanking intons:
+upD28vNES_dwnInts <- dwnIntrons[which(dwnIntrons$id %in% upD28vNES$id),]
+upD28vNES_dwnInts_gr <- makeGRangesFromDataFrame(upD28vNES_dwnInts)
+upD28vNES_dwnInts_seqs <- getSeq(genome, upD28vNES_dwnInts_gr, as.character=TRUE)
+upD28vNES_dwnInts_seqs <- as.data.frame(upD28vNES_dwnInts_seqs)
+colnames(upD28vNES_dwnInts_seqs) <- "seqs"
+upD28vNES_dwnInts_seqs$id <- upD28vNES_dwnInts$intronID
+upD28vNES_dwnInts_seqs <- upD28vNES_dwnInts_seqs[,c(2,1)]
+upD28vNES_dwnInts_fasta <- dataframe2fas(upD28vNES_dwnInts_seqs, "upD28vNES_dwnInts.fasta")
+rm(upD28vNES_dwnInts_fasta)
+
+#dwnD28vNES upstream flanking intons:
+dwnD28vNES_upInts <- upIntrons[which(upIntrons$id %in% dwnD28vNES$id),]
+dwnD28vNES_upInts_gr <- makeGRangesFromDataFrame(dwnD28vNES_upInts)
+dwnD28vNES_upInts_seqs <- getSeq(genome, dwnD28vNES_upInts_gr, as.character=TRUE)
+dwnD28vNES_upInts_seqs <- as.data.frame(dwnD28vNES_upInts_seqs)
+colnames(dwnD28vNES_upInts_seqs) <- "seqs"
+dwnD28vNES_upInts_seqs$id <- dwnD28vNES_upInts$intronID
+dwnD28vNES_upInts_seqs <- dwnD28vNES_upInts_seqs[,c(2,1)]
+dwnD28vNES_upInts_fasta <- dataframe2fas(dwnD28vNES_upInts_seqs, "dwnD28vNES_upInts.fasta")
+#dwnD28vNES downstream flanking intons:
+dwnD28vNES_dwnInts <- dwnIntrons[which(dwnIntrons$id %in% dwnD28vNES$id),]
+dwnD28vNES_dwnInts_gr <- makeGRangesFromDataFrame(dwnD28vNES_dwnInts)
+dwnD28vNES_dwnInts_seqs <- getSeq(genome, dwnD28vNES_dwnInts_gr, as.character=TRUE)
+dwnD28vNES_dwnInts_seqs <- as.data.frame(dwnD28vNES_dwnInts_seqs)
+colnames(dwnD28vNES_dwnInts_seqs) <- "seqs"
+dwnD28vNES_dwnInts_seqs$id <- dwnD28vNES_dwnInts$intronID
+dwnD28vNES_dwnInts_seqs <- dwnD28vNES_dwnInts_seqs[,c(2,1)]
+dwnD28vNES_dwnInts_fasta <- dataframe2fas(dwnD28vNES_dwnInts_seqs, "dwnD28vNES_dwnInts.fasta")
+rm(dwnD28vNES_dwnInts_fasta)
+
+#upD28vD5 upstream flanking intons:
+upD28vD5_upInts <- upIntrons[which(upIntrons$id %in% upD28vD5$id),]
+upD28vD5_upInts_gr <- makeGRangesFromDataFrame(upD28vD5_upInts)
+upD28vD5_upInts_seqs <- getSeq(genome, upD28vD5_upInts_gr, as.character=TRUE)
+upD28vD5_upInts_seqs <- as.data.frame(upD28vD5_upInts_seqs)
+colnames(upD28vD5_upInts_seqs) <- "seqs"
+upD28vD5_upInts_seqs$id <- upD28vD5_upInts$intronID
+upD28vD5_upInts_seqs <- upD28vD5_upInts_seqs[,c(2,1)]
+upD28vD5_upInts_fasta <- dataframe2fas(upD28vD5_upInts_seqs, "upD28vD5_upInts.fasta")
+rm(upD28vD5_upInts_fasta)
+#upD28vD5 downstream flanking intons:
+upD28vD5_dwnInts <- dwnIntrons[which(dwnIntrons$id %in% upD28vD5$id),]
+upD28vD5_dwnInts_gr <- makeGRangesFromDataFrame(upD28vD5_dwnInts)
+upD28vD5_dwnInts_seqs <- getSeq(genome, upD28vD5_dwnInts_gr, as.character=TRUE)
+upD28vD5_dwnInts_seqs <- as.data.frame(upD28vD5_dwnInts_seqs)
+colnames(upD28vD5_dwnInts_seqs) <- "seqs"
+upD28vD5_dwnInts_seqs$id <- upD28vD5_dwnInts$intronID
+upD28vD5_dwnInts_seqs <- upD28vD5_dwnInts_seqs[,c(2,1)]
+upD28vD5_dwnInts_fasta <- dataframe2fas(upD28vD5_dwnInts_seqs, "upD28vD5_dwnInts.fasta")
+rm(upD28vD5_dwnInts_fasta)
+
+#dwnD28vD5 upstream flanking intons:
+dwnD28vD5_upInts <- upIntrons[which(upIntrons$id %in% dwnD28vD5$id),]
+dwnD28vD5_upInts_gr <- makeGRangesFromDataFrame(dwnD28vD5_upInts)
+dwnD28vD5_upInts_seqs <- getSeq(genome, dwnD28vD5_upInts_gr, as.character=TRUE)
+dwnD28vD5_upInts_seqs <- as.data.frame(dwnD28vD5_upInts_seqs)
+colnames(dwnD28vD5_upInts_seqs) <- "seqs"
+dwnD28vD5_upInts_seqs$id <- dwnD28vD5_upInts$intronID
+dwnD28vD5_upInts_seqs <- dwnD28vD5_upInts_seqs[,c(2,1)]
+dwnD28vD5_upInts_fasta <- dataframe2fas(dwnD28vD5_upInts_seqs, "dwnD28vD5_upInts.fasta")
+rm(dwnD28vD5_upInts_fasta)
+#dwnD28vD5 downstream flanking intons:
+dwnD28vD5_dwnInts <- dwnIntrons[which(dwnIntrons$id %in% dwnD28vD5$id),]
+dwnD28vD5_dwnInts_gr <- makeGRangesFromDataFrame(dwnD28vD5_dwnInts)
+dwnD28vD5_dwnInts_seqs <- getSeq(genome, dwnD28vD5_dwnInts_gr, as.character=TRUE)
+dwnD28vD5_dwnInts_seqs <- as.data.frame(dwnD28vD5_dwnInts_seqs)
+colnames(dwnD28vD5_dwnInts_seqs) <- "seqs"
+dwnD28vD5_dwnInts_seqs$id <- dwnD28vD5_dwnInts$intronID
+dwnD28vD5_dwnInts_seqs <- dwnD28vD5_dwnInts_seqs[,c(2,1)]
+dwnD28vD5_dwnInts_fasta <- dataframe2fas(dwnD28vD5_dwnInts_seqs, "dwnD28vD5_dwnInts.fasta")
+rm(dwnD28vD5_dwnInts_fasta)
+
+
+```
+
+#Make BED files of flanking Intronic regions
+```{r}
+#Make bed file for intersection of Intron lengths with Alu elements
+upIntrons$score <- rep(".", length(upIntrons$id))
+upIntrons_bed <- upIntrons[,c(3,5,6,2,8,4)]
+write.table(upIntrons_bed, "upIntrons.bed", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t")
+#Make bed file to determine Alu elements closest to BSJ
+upIntrons$newStop <- upIntrons$start + 1
+upBSJ_bed <- upIntrons[,c(3,5,9,2,8,4)]
+write.table(upBSJ_bed, "upBSJ.bed", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t")
+
+dwnIntrons$score <- rep(".", length(dwnIntrons$id))
+dwnIntrons_bed <- dwnIntrons[,c(3,5,6,2,8,4)]
+write.table(dwnIntrons_bed, "dwnIntrons.bed", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t")
+dwnIntrons$newStop <- dwnIntrons$start + 1
+dwnBSJ_bed <- dwnIntrons[,c(3,5,9,2,8,4)]
+write.table(dwnBSJ_bed, "dwnBSJ.bed", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t")
+
+###
+upD28vNES_upInts$score <- rep(".", length(upD28vNES_upInts$id))
+upD28vNES_upInts_bed <- upD28vNES_upInts[,c(3,5,9,2,8,4)]
+write.table(upD28vNES_upInts_bed, "upD28vNES_upInts.bed", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t")
+
+upD28vNES_dwnInts$score <- rep(".", length(upD28vNES_dwnInts$id))
+upD28vNES_dwnInts_bed <- upD28vNES_dwnInts[,c(3,5,6,2,8,4)]
+write.table(upD28vNES_dwnInts_bed, "upD28vNES_dwnInts.bed", row.names = FALSE, col.names = FALSE, quote = FALSE, sep = "\t")
+###
+
+
+```
+
+#Filter Alu elements overlapping introns and find Alu elements closest to the BSJ
+```{bash}
+
+bedtools intersect -a upIntrons.sort.bed -b Alu_repeats.sort.bed  -F 0.5 -wb > upIntrons_AluOverlap_50per.txt
+cut -f 7- upIntrons_AluOverlap_50per.txt > upIntrons_AluOverlap_50per.bed
+bedtools sort -i upIntrons_AluOverlap_50per.bed > upIntrons_AluOverlap_50per.sort.bed
+bedtools closest -a upBSJ.sort.bed -b upIntrons_AluOverlap_50per.sort.bed -D a -id -t all > upIntrons_closestAlu.txt
+
+bedtools intersect -a dwnIntrons.sort.bed -b Alu_repeats.sort.bed  -F 0.5 -wb > dwnIntrons_AluOverlap_50per.txt
+cut -f 7- dwnIntrons_AluOverlap_50per.txt > dwnIntrons_AluOverlap_50per.bed
+bedtools sort -i dwnIntrons_AluOverlap_50per.bed > dwnIntrons_AluOverlap_50per.sort.bed
+bedtools closest -a dwnBSJ.sort.bed -b dwnIntrons_AluOverlap_50per.sort.bed -D a -iu -t all > dwnIntrons_closestAlu.txt
+
+```
+
+#Analysis of flanking introns Inverted ALu Elements (IAEs) and length
+```{r}
+#Import bedtools results
+  upIntrons_closestAlu <- read.delim("~/Documents/circRNAseq/ctrl9_diff/Intron_analysis/upIntrons_closestAlu.txt", header=FALSE)
+upIntrons_closestAlu <- unique(upIntrons_closestAlu)
+colnames(upIntrons_closestAlu) <- c("upInt_chr", "upInt_start", "upInt_stop", "upInt_ID", "upInt_score", "upInt_strand", "upInt_Alu_chr", "upInt_Alu_start", "upInt_Alu_stop", "upInt_Alu_ID", "upInt_Alu_score", "upInt_Alu_strand", "upInt_Alu_dist")
+upIntrons_closestAlu$circID <- sapply(strsplit(as.character(upIntrons_closestAlu$upInt_ID), "_"), "[", 1) # Extract circRNA ID from IntronID
+
+dwnIntrons_closestAlu <- read.delim("~/Documents/circRNAseq/ctrl9_diff/Intron_analysis/dwnIntrons_closestAlu.txt", header=FALSE)
+dwnIntrons_closestAlu <- unique(dwnIntrons_closestAlu)
+colnames(dwnIntrons_closestAlu) <- c("dwnInt_chr", "dwnInt_start", "dwnInt_stop", "dwnInt_ID", "dwnInt_score", "dwnInt_strand", "dwnInt_Alu_chr", "dwnInt_Alu_start", "dwnInt_Alu_stop", "dwnInt_Alu_ID", "dwnInt_Alu_score", "dwnInt_Alu_strand", "dwnInt_Alu_dist")
+dwnIntrons_closestAlu$circID <- sapply(strsplit(as.character(dwnIntrons_closestAlu$dwnInt_ID), "_"), "[", 1)
+
+introns_closestAlu <- merge(upIntrons_closestAlu, dwnIntrons_closestAlu, by = "circID", all = TRUE)
+introns_closestAlu <- introns_closestAlu[,c(1,11,13,14,24,26,27)]
+introns_closestAlu$strandCombo <- paste0(introns_closestAlu$upInt_Alu_strand, introns_closestAlu$dwnInt_Alu_strand)
+#Filter for circs with Inverted Alu sequences
+invertedAlu_circs <- introns_closestAlu[which(introns_closestAlu$strandCombo == "+-" | introns_closestAlu$strandCombo == "-+"),]
+invertedAlu_circs$meanAluDist <- (abs(invertedAlu_circs$upInt_Alu_dist) + invertedAlu_circs$dwnInt_Alu_dist)/2
+invertedAlu_circs$sumAluDist <- abs(invertedAlu_circs$upInt_Alu_dist) + invertedAlu_circs$dwnInt_Alu_dist
+
+
+circsAnnotIntrons <- annotatedCirc[which(annotatedCirc$lenUpIntron != "NA" & annotatedCirc$lenDownIntron != "NA"),]
+circsAnnotIntrons$totIntLen <- as.numeric(circsAnnotIntrons$lenUpIntron) + as.numeric(circsAnnotIntrons$lenDownIntron)
+longIntCircs <- circsAnnotIntrons[which(circsAnnotIntrons$meanLengthIntrons > median(circsAnnotIntrons$meanLengthIntrons)),]
+shortIntCircs <- circsAnnotIntrons[which(circsAnnotIntrons$meanLengthIntrons <= median(circsAnnotIntrons$meanLengthIntrons)),]
+
+#Subset circs by proximal IAE position (less than median distance)
+proxInvertedAlu_circs <- invertedAlu_circs[which(invertedAlu_circs$meanAluDist <= median(invertedAlu_circs$meanAluDist)),]
+#subset pIAE circs by length
+pIAE_short <- proxInvertedAlu_circs[which(proxInvertedAlu_circs$circID %in% shortIntCircs$id),]
+pIAE_long <- proxInvertedAlu_circs[which(proxInvertedAlu_circs$circID %in% longIntCircs$id),]
+
+#Subset circs with distal or no IAE 
+non_pIAE_circs <- circsAnnotIntrons[which(!circsAnnotIntrons$id %in% proxInvertedAlu_circs$circID),]
+#subset non-pIAE circs by length
+non_pIAE_short <- non_pIAE_circs[which(non_pIAE_circs$id %in% shortIntCircs$id),]
+non_pIAE_long <- non_pIAE_circs[which(non_pIAE_circs$id %in% longIntCircs$id),]
+#calculate percentage of alls circs by flanking intron IAE type
+pIAE_short_per <- length(pIAE_short$circID)/length(circsAnnotIntrons$id)
+pIAE_long_per <- length(pIAE_long$circID)/length(circsAnnotIntrons$id)
+non_pIAE_short_per <- length(non_pIAE_short$id)/length(circsAnnotIntrons$id)
+non_pIAE_long_per <- length(non_pIAE_long$id)/length(circsAnnotIntrons$id)
+
+#calculate percentage of circs up at D28 by flanking intron IAE type
+pIAE_short_upD28_per <- length(intersect(pIAE_short$circID, upD28vNES$id))/length(intersect(circsAnnotIntrons$id, upD28vNES$id))
+pIAE_long_upD28_per <- length(intersect(pIAE_long$circID, upD28vNES$id))/length(intersect(circsAnnotIntrons$id, upD28vNES$id))
+non_pIAE_short_upD28_per <- length(intersect(non_pIAE_short$id, upD28vNES$id))/length(intersect(circsAnnotIntrons$id, upD28vNES$id))
+non_pIAE_long_upD28_per <- length(intersect(non_pIAE_long$id, upD28vNES$id))/length(intersect(circsAnnotIntrons$id, upD28vNES$id))
+
+#calculate percentage of circs dwn at D28 by flanking intron IAE type
+pIAE_short_dwnD28_per <- length(intersect(pIAE_short$circID, dwnD28vNES$id))/length(intersect(circsAnnotIntrons$id, dwnD28vNES$id))
+pIAE_long_dwnD28_per <- length(intersect(pIAE_long$circID, dwnD28vNES$id))/length(intersect(circsAnnotIntrons$id, dwnD28vNES$id))
+non_pIAE_short_dwnD28_per <- length(intersect(non_pIAE_short$id, dwnD28vNES$id))/length(intersect(circsAnnotIntrons$id, dwnD28vNES$id))
+non_pIAE_long_dwnD28_per <- length(intersect(non_pIAE_long$id, dwnD28vNES$id))/length(intersect(circsAnnotIntrons$id, dwnD28vNES$id))
+
+
+
+
+IAE_table <- as.data.frame(cbind(c(rep("allCircs", 4), rep("upD28circs", 4)), rep(c("pIAE-S", "dIAE-L", "pIAE-L", "dIAE-S"),2), c(pIAE_short_per, non_pIAE_long_per, pIAE_long_per, non_pIAE_short_per, pIAE_short_upD28_per, non_pIAE_long_upD28_per, pIAE_long_upD28_per, non_pIAE_short_upD28_per)))
+colnames(IAE_table) = c("group", "subgroup", "value")
+IAE_table$percent = as.numeric(IAE_table$value)*100
+IAE_table$percent = as.numeric(IAE_table$percent)
+IAE_table$group = factor(IAE_table$group)
+IAE_barPlot <- ggplot(IAE_table, aes(x = group, y = percent, fill = subgroup, colour = subgroup)) +
+  geom_bar(position = "stack", stat = "identity", width = 0.6, alpha = 0.7, colour = "white", size = 0.8) + 
+  scale_y_continuous(expand = c(0,0,0.05,0)) + 
+  labs(y="Flanking intron type (%)") +
+  theme(panel.background = element_blank(), 
+        panel.grid = element_blank(), 
+        axis.ticks = element_line(colour = "darkgray", size = 0.5), 
+        axis.line = element_line(colour = "darkgray", size = 0.5), 
+        axis.text.y = element_text(family = "Helvetica", colour = "black", size = 7), 
+        axis.text.x = element_text(family = "Helvetica", colour = "black", size = 11, angle = 45, vjust = 1, hjust = 1), 
+        axis.title.y = element_text(family = "Helvetica", colour = "black", size = 9, face = "bold"), 
+        axis.title.x = element_blank(), 
+        legend.title = element_blank(), 
+        legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) +
+  scale_fill_manual(values=c("maroon4","maroon3","olivedrab4","olivedrab3"))
+
+IAE_table2 <- as.data.frame(cbind(c(rep("allCircs", 4), rep("dwnD28circs", 4)), rep(c("pIAE-S", "dIAE-L", "pIAE-L", "dIAE-S"),2), c(pIAE_short_per, non_pIAE_long_per, pIAE_long_per, non_pIAE_short_per, pIAE_short_dwnD28_per, non_pIAE_long_dwnD28_per, pIAE_long_dwnD28_per, non_pIAE_short_dwnD28_per)))
+colnames(IAE_table2) = c("group", "subgroup", "value")
+IAE_table2$percent = as.numeric(IAE_table$value)*100
+IAE_table2$percent = as.numeric(IAE_table$percent)
+IAE_table2$group = factor(IAE_table2$group)
+IAE_barPlot2 <- ggplot(IAE_table2, aes(x = group, y = percent, fill = subgroup, colour = subgroup)) +
+  geom_bar(position = "stack", stat = "identity", width = 0.6, alpha = 0.7, colour = "white", size = 0.8) + 
+  scale_y_continuous(expand = c(0,0,0.05,0)) + 
+  labs(y="Flanking intron type (%)") +
+  theme(panel.background = element_blank(), 
+        panel.grid = element_blank(), 
+        axis.ticks = element_line(colour = "darkgray", size = 0.5), 
+        axis.line = element_line(colour = "darkgray", size = 0.5), 
+        axis.text.y = element_text(family = "Helvetica", colour = "black", size = 7), 
+        axis.text.x = element_text(family = "Helvetica", colour = "black", size = 11, angle = 45, vjust = 1, hjust = 1), 
+        axis.title.y = element_text(family = "Helvetica", colour = "black", size = 9, face = "bold"), 
+        axis.title.x = element_blank(), 
+        legend.title = element_blank(), 
+        legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) +
+  scale_fill_manual(values=c("maroon4","maroon3","olivedrab4","olivedrab3"))
+
+ggarrange(IAE_barPlot, IAE_barPlot2, common.legend = TRUE, legend = "right")
+
+#Compare mean IAE distance of all circRNAs and circRNAs upregulated at D28
+upD28_IAEcircs <- invertedAlu_circs[which(invertedAlu_circs$circID%in% upD28vNES$id),]
+z.test(x=as.numeric(invertedAlu_circs$meanAluDist), sigma.x=sd(as.numeric(invertedAlu_circs$meanAluDist)), y=as.numeric(upD28_IAEcircs$meanAluDist), sigma.y=sd(as.numeric(upD28_IAEcircs$meanAluDist)))
+
+#Compare mean IAE distance of all circRNAs and circRNAs downregulated at D28
+dwnD28_IAEcircs <- invertedAlu_circs[which(invertedAlu_circs$circID%in% dwnD28vNES$id),]
+z.test(x=as.numeric(invertedAlu_circs$meanAluDist), sigma.x=sd(as.numeric(invertedAlu_circs$meanAluDist)), y=as.numeric(dwnD28_IAEcircs$meanAluDist), sigma.y=sd(as.numeric(dwnD28_IAEcircs$meanAluDist)))
+
+#Compare mean intron Length of all circRNAs and circRNAs upregulated at D28
+upD28_circsAnnotIntrons <- circsAnnotIntrons[which(circsAnnotIntrons$id %in% upD28vNES$id),]
+z.test(x=as.numeric(circsAnnotIntrons$meanLengthIntrons), sigma.x=sd(as.numeric(circsAnnotIntrons$meanLengthIntrons)), y=as.numeric(upD28_circsAnnotIntrons$meanLengthIntrons), sigma.y=sd(as.numeric(upD28_circsAnnotIntrons$meanLengthIntrons)))
+
+#Compare mean intron Length of all circRNAs and circRNAs downregulated at D28
+dwnD28_circsAnnotIntrons <- circsAnnotIntrons[which(circsAnnotIntrons$id %in% dwnD28vNES$id),]
+z.test(x=as.numeric(circsAnnotIntrons$meanLengthIntrons), sigma.x=sd(as.numeric(circsAnnotIntrons$meanLengthIntrons)), y=as.numeric(dwnD28_circsAnnotIntrons$meanLengthIntrons), sigma.y=sd(as.numeric(dwnD28_circsAnnotIntrons$meanLengthIntrons)))
+
+
+#Density plots 
+circsAnnotIntrons$group <- rep("circs", length(circsAnnotIntrons$id))
+upD28_circsAnnotIntrons$group <- rep("upD28_circs", length(upD28_circsAnnotIntrons$id))
+totIntLength_circs <- circsAnnotIntrons[,c(28,27)]
+totIntLength_upD28circs <- upD28_circsAnnotIntrons[,c(28,27)]
+
+totIntLen <- rbind(totIntLength_circs, totIntLength_upD28circs)
+
+
+mu <- ddply(totIntLen, "group", summarise, grp.mean=median(totIntLen))
+
+densPlot_IntLen <- ggplot(totIntLen, aes(x=totIntLen, color=group, fill=group)) + geom_density(alpha=0.2, size = 0.5) + geom_vline(data=mu, aes(xintercept=grp.mean, color=group), linetype="dashed", size=0.5) + scale_x_log10() + labs(x="Total flanking intron length (Log10(nts))", y="Density") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "gray", size = 0.1),panel.grid.minor = element_blank(), panel.border = element_rect(fill=NA, colour = "darkgray", size = 0.5), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.text = element_text(family = "Helvetica", colour = "black", size = 7), axis.title = element_text(family = "Helvetica", colour = "black", size = 9), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("gray40", "purple3")) + scale_fill_manual(values=c("gray40", "purple3"))
+densPlot_IntLen
+
+
+
+invertedAlu_circs$group <- rep("circs", length(invertedAlu_circs$circID))
+upD28_IAEcircs$group <- rep("upD28_circs", length(upD28_IAEcircs$circID))
+dwnD28_IAEcircs$group <- rep("dwnD28_circs", length(dwnD28_IAEcircs$circID))
+totIAEdist_circs <- invertedAlu_circs[,c(11,10)]
+totIAEdist_upD28circs <- upD28_IAEcircs[,c(11,10)]
+totIAEdist_dwnD28circs <- dwnD28_IAEcircs[,c(11,10)]
+
+totIAEdist <- rbind(totIAEdist_circs, totIAEdist_upD28circs)
+totIAEdist2 <- rbind(totIAEdist_circs, totIAEdist_dwnD28circs)
+
+muIAE <- ddply(totIAEdist, "group", summarise, grp.mean=median(sumAluDist))
+muIAE2 <- ddply(totIAEdist2, "group", summarise, grp.mean=median(sumAluDist))
+
+densPlot_IAEdist <- ggplot(totIAEdist, aes(x=sumAluDist, color=group, fill=group)) + geom_density(alpha=0.2, size = 0.5) + geom_vline(data=muIAE, aes(xintercept=grp.mean, color=group), linetype="dashed", size=0.5) + scale_x_log10() + labs(x="Total distance to IAE (Log10(nts))", y="Density") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "gray", size = 0.1),panel.grid.minor = element_blank(), panel.border = element_rect(fill=NA, colour = "darkgray", size = 0.5), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.text = element_text(family = "Helvetica", colour = "black", size = 7), axis.title = element_text(family = "Helvetica", colour = "black", size = 9), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("gray40", "purple3")) + scale_fill_manual(values=c("gray40", "purple3"))
+densPlot_IAEdist
+
+densPlot_IAEdist2 <- ggplot(totIAEdist2, aes(x=sumAluDist, color=group, fill=group)) + geom_density(alpha=0.2, size = 0.5) + geom_vline(data=muIAE2, aes(xintercept=grp.mean, color=group), linetype="dashed", size=0.5) + scale_x_log10() + labs(x="Total distance to IAE (Log10(nts))", y="Density") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "gray", size = 0.1),panel.grid.minor = element_blank(), panel.border = element_rect(fill=NA, colour = "darkgray", size = 0.5), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.text = element_text(family = "Helvetica", colour = "black", size = 7), axis.title = element_text(family = "Helvetica", colour = "black", size = 9), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("gray40", "purple3")) + scale_fill_manual(values=c("gray40", "purple3"))
+densPlot_IAEdist2
+
+
+rm(totIAEdist_circs, totIAEdist_upD28circs, totIAEdist_dwnD28circs)
+###
+meanALUdist_circs <- invertedAlu_circs[,c(11,9)]
+meanALUdist_upD28circs <- upD28_IAEcircs[,c(11,9)]
+meanALUdist_dwnD28circs <- dwnD28_IAEcircs[,c(11,9)]
+meanALUdist <- rbind(meanALUdist_circs, meanALUdist_upD28circs)
+meanALUdist2 <- rbind(meanALUdist_circs, meanALUdist_dwnD28circs)
+
+meanALUdist_sum <- ddply(meanALUdist, "group", summarise, grp.mean=mean(as.numeric(meanAluDist)), grp.se=std.err.mean(as.numeric(meanAluDist)))
+
+meanALUdist_sum2 <- ddply(meanALUdist2, "group", summarise, grp.mean=mean(as.numeric(meanAluDist)), grp.se=std.err.mean(as.numeric(meanAluDist)))
+
+rm(meanALUdist, meanALUdist_circs, meanALUdist_upD28circs, meanALUdist_dwnD28circs)
+
+barPlot_ALUdist <- ggplot(meanALUdist_sum, aes(x=group, y=grp.mean, color=group, fill=group)) + geom_bar(stat = "identity", alpha=0.2, size=0.3, width = 0.7) + labs(y="Mean Alu distance (nts)") + geom_errorbar(aes(ymin=grp.mean-grp.se, ymax=grp.mean+grp.se), width=0.4, size = 0.5) + theme(panel.background = element_blank(), panel.grid = element_blank(), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.line = element_line(colour = "darkgray", size = 0.5), axis.text.y = element_text(family = "Helvetica", colour = "black", size = 7), axis.text.x = element_text(family = "Helvetica", colour = "black", size = 11, angle = 45, vjust = 1, hjust = 1), axis.title.y = element_text(family = "Helvetica", colour = "black", size = 9, face = "bold"), axis.title.x = element_blank(), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("gray40", "purple3")) + scale_fill_manual(values=c("gray40", "purple3")) + scale_y_continuous(expand=c(0,0,0.1,0)) 
+barPlot_ALUdist
+
+barPlot_ALUdist2 <- ggplot(meanALUdist_sum2, aes(x=group, y=grp.mean, color=group, fill=group)) + geom_bar(stat = "identity", alpha=0.2, size=0.3, width = 0.7) + labs(y="Mean Alu distance (nts)") + geom_errorbar(aes(ymin=grp.mean-grp.se, ymax=grp.mean+grp.se), width=0.4, size = 0.5) + theme(panel.background = element_blank(), panel.grid = element_blank(), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.line = element_line(colour = "darkgray", size = 0.5), axis.text.y = element_text(family = "Helvetica", colour = "black", size = 7), axis.text.x = element_text(family = "Helvetica", colour = "black", size = 11, angle = 45, vjust = 1, hjust = 1), axis.title.y = element_text(family = "Helvetica", colour = "black", size = 9, face = "bold"), axis.title.x = element_blank(), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("gray40", "purple3")) + scale_fill_manual(values=c("gray40", "purple3")) + scale_y_continuous(expand=c(0,0,0.1,0)) 
+barPlot_ALUdist2 
+
+
+#Bar plot of mean and standard error
+meanIntLen_circs <- circsAnnotIntrons[,c(28,24)]
+meanIntLen_upD28circs <- upD28_circsAnnotIntrons[,c(28,24)]
+meanIntLen <- rbind(meanIntLen_circs, meanIntLen_upD28circs)
+
+meanIntLen_sum <- ddply(meanIntLen, "group", summarise, grp.mean=mean(as.numeric(meanLengthIntrons)), grp.se=std.err.mean(as.numeric(meanLengthIntrons)))
+
+barPlot_IntLen <- ggplot(meanIntLen_sum, aes(x=group, y=grp.mean, color=group, fill=group)) + geom_bar(stat = "identity", alpha=0.2, size=0.3, width = 0.7) + labs(y="Mean intron length (nts)") + geom_errorbar(aes(ymin=grp.mean-grp.se, ymax=grp.mean+grp.se), width=0.4, size = 0.5) + theme(panel.background = element_blank(), panel.grid = element_blank(), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.line = element_line(colour = "darkgray", size = 0.5), axis.text.y = element_text(family = "Helvetica", colour = "black", size = 7), axis.text.x = element_text(family = "Helvetica", colour = "black", size = 11, angle = 45, vjust = 1, hjust = 1), axis.title.y = element_text(family = "Helvetica", colour = "black", size = 9, face = "bold"), axis.title.x = element_blank(), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("gray40", "purple3")) + scale_fill_manual(values=c("gray40", "purple3")) + scale_y_continuous(expand=c(0,0,0.1,0)) 
+
+#Compare mean intron Length of all circRNAs and circRNAs downregulated at D28
+dwnD28_circsAnnotIntrons <- circsAnnotIntrons[which(circsAnnotIntrons$id %in% dwnD28vNES$id),]
+dwnD28_circsAnnotIntrons$group <- rep("dwnD28_circs", length(dwnD28_circsAnnotIntrons$id))
+
+z.test(x=as.numeric(circsAnnotIntrons$meanLengthIntrons), sigma.x=sd(as.numeric(circsAnnotIntrons$meanLengthIntrons)), y=as.numeric(dwnD28_circsAnnotIntrons$meanLengthIntrons), sigma.y=sd(as.numeric(dwnD28_circsAnnotIntrons$meanLengthIntrons)))
+
+totIntLength_dwnD28circs <- dwnD28_circsAnnotIntrons[,c(28,27)]
+totIntLen2 <- rbind(totIntLength_circs, totIntLength_dwnD28circs)
+rm(totIntLength_circs, totIntLength_upD28circs, totIntLength_dwnD28circs)
+
+mu2 <- ddply(totIntLen2, "group", summarise, grp.mean=median(totIntLen))
+
+densPlot_IntLen2 <- ggplot(totIntLen2, aes(x=totIntLen, color=group, fill=group)) + geom_density(alpha=0.2, size = 0.5) + geom_vline(data=mu2, aes(xintercept=grp.mean, color=group), linetype="dashed", size=0.5) + scale_x_log10() + labs(x="Total flanking intron length (Log10(nts))", y="Density") + theme(panel.background = element_blank(), panel.grid.major = element_line(colour = "gray", size = 0.1),panel.grid.minor = element_blank(), panel.border = element_rect(fill=NA, colour = "darkgray", size = 0.5), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.text = element_text(family = "Helvetica", colour = "black", size = 7), axis.title = element_text(family = "Helvetica", colour = "black", size = 9), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("gray40", "purple3")) + scale_fill_manual(values=c("gray40", "purple3"))
+densPlot_IntLen2
+
+#Bar plot of mean and standard error
+meanIntLen_circs <- circsAnnotIntrons[,c(28,24)]
+meanIntLen_dwnD28circs <- dwnD28_circsAnnotIntrons[,c(28,24)]
+meanIntLen2 <- rbind(meanIntLen_circs, meanIntLen_dwnD28circs)
+
+meanIntLen_sum2 <- ddply(meanIntLen2, "group", summarise, grp.mean=mean(as.numeric(meanLengthIntrons)), grp.se=std.err.mean(as.numeric(meanLengthIntrons)))
+rm(meanIntLen, meanIntLen2, meanIntLen_circs, meanIntLen_upD28circs, meanIntLen_dwnD28circs)
+
+barPlot_IntLen2 <- ggplot(meanIntLen_sum2, aes(x=group, y=grp.mean, color=group, fill=group)) + geom_bar(stat = "identity", alpha=0.2, size=0.3, width = 0.7) + labs(y="Mean intron length (nts)") + geom_errorbar(aes(ymin=grp.mean-grp.se, ymax=grp.mean+grp.se), width=0.4, size = 0.5) + theme(panel.background = element_blank(), panel.grid = element_blank(), axis.ticks = element_line(colour = "darkgray", size = 0.5), axis.line = element_line(colour = "darkgray", size = 0.5), axis.text.y = element_text(family = "Helvetica", colour = "black", size = 7), axis.text.x = element_text(family = "Helvetica", colour = "black", size = 11, angle = 45, vjust = 1, hjust = 1), axis.title.y = element_text(family = "Helvetica", colour = "black", size = 9, face = "bold"), axis.title.x = element_blank(), legend.title = element_blank(), legend.text = element_text(family = "Helvetica", colour = "black", size = 8)) + scale_colour_manual(values=c("gray40", "purple3")) + scale_fill_manual(values=c("gray40", "purple3")) + scale_y_continuous(expand=c(0,0,0.1,0)) 
+barPlot_IntLen2
+
+ggarrange(barPlot_IntLen2, barPlot_ALUdist2, common.legend = TRUE, legend = "right")
+
+```
+
+
+#Analyse SFPQ motif position in circRNA flanking introns (Output of MEME suite - FIMO analysis)
+
+##Upstream introns of circs Up at D28vNES
+```{r}
+#create breaks for binning fimo counts by distance
+fimo_breaks <- c(0, 2000, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000)
+fimo_tags <- c("1-2000","2001-4000","4001-6000","6001-8000","8001-10000","10001-12000", "12001-14000", "14001-16000", "16001-18000","18001-20000")
+
+#calculate length of upstream introns
+upIntrons$intronLength <- upIntrons$stop - upIntrons$start
+#seperate upstream introns on + and - strands
+upIntrons_pos <- upIntrons[which(upIntrons$strand == "+"),]
+upIntrons_neg <- upIntrons[which(upIntrons$strand == "-"),]
+
+#Load upstream data:
+fimo_upD28vNES_upInts <- read.delim("upD28vNES_upInts_fimo.tsv")
+fimo_upD28vNES_upInts$intronLength <- with(upIntrons, intronLength[match(fimo_upD28vNES_upInts$sequence_name, intronID)])
+#seperate "+" strand introns
+fimo_upD28vNES_upIntsPos <- fimo_upD28vNES_upInts[which(fimo_upD28vNES_upInts$sequence_name %in% upIntrons_pos$intronID),]
+#calculate motif distance relative to BSJ site
+fimo_upD28vNES_upIntsPos$BSJdist <- fimo_upD28vNES_upIntsPos$intronLength - fimo_upD28vNES_upIntsPos$stop
+#calculate motif distance relative to intronic end distal from the BSJ
+fimo_upD28vNES_upIntsPos$dist <- fimo_upD28vNES_upIntsPos$start
+#calculate motif distance from 5'end:
+fimo_upD28vNES_upIntsPos$dist5 <- fimo_upD28vNES_upIntsPos$start
+
+#repeat for upIntrons on "-" strand (inverse):
+fimo_upD28vNES_upIntsNeg <- fimo_upD28vNES_upInts[which(fimo_upD28vNES_upInts$sequence_name %in% upIntrons_neg$intronID),]
+fimo_upD28vNES_upIntsNeg$BSJdist <- fimo_upD28vNES_upIntsNeg$start
+fimo_upD28vNES_upIntsNeg$dist <- fimo_upD28vNES_upIntsNeg$intronLength - fimo_upD28vNES_upIntsNeg$stop
+fimo_upD28vNES_upIntsNeg$dist5 <- fimo_upD28vNES_upIntsNeg$start
+
+#merge
+fimo_upD28vNES_upInts <- rbind(fimo_upD28vNES_upIntsPos[,c(3,11:14)], fimo_upD28vNES_upIntsNeg[,c(3,11:14)])
+rm(fimo_upD28vNES_upIntsPos, fimo_upD28vNES_upIntsNeg)
+#bin
+fimo_upD28vNES_upInts$BSJdistBin <- cut(fimo_upD28vNES_upInts$BSJdist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_upD28vNES_upInts$distBin <- cut(fimo_upD28vNES_upInts$dist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_upD28vNES_upInts$dist5Bin <- cut(fimo_upD28vNES_upInts$dist5, breaks = fimo_breaks, labels=fimo_tags)
+
+#summarise
+fimo_upD28vNES_upInts <- fimo_upD28vNES_upInts %>% group_by(BSJdistBin) %>% mutate(BSJdistFreq=n())
+fimo_upD28vNES_upInts <- fimo_upD28vNES_upInts %>% group_by(distBin) %>% mutate(distFreq=n())
+fimo_upD28vNES_upInts <- fimo_upD28vNES_upInts %>% group_by(dist5Bin) %>% mutate(dist5Freq=n())
+
+#normalise by number of circRNAs
+fimo_upD28vNES_upInts$BSJdistFreqNorm <- as.numeric(fimo_upD28vNES_upInts$BSJdistFreq)/length(upD28vNES_upInts$id)
+fimo_upD28vNES_upInts$distFreqNorm <- as.numeric(fimo_upD28vNES_upInts$distFreq)/length(upD28vNES_upInts$id)
+fimo_upD28vNES_upInts$dist5FreqNorm <- as.numeric(fimo_upD28vNES_upInts$dist5Freq)/length(upD28vNES_upInts$id)
+
+
+#Create group column for plotting
+fimo_upD28vNES_upInts$group <- rep("upD28vNES", length(fimo_upD28vNES_upInts$sequence_name))
+fimo_upD28vNES_upInts$distLabels <- paste0("+",fimo_upD28vNES_upInts$distBin)
+fimo_upD28vNES_upInts$BSJdistLabels <- paste0("+",fimo_upD28vNES_upInts$BSJdistBin)
+#Summarise
+fimoSum_upD28vNES_upIntsDist <- unique(fimo_upD28vNES_upInts[which(fimo_upD28vNES_upInts$distBin != "NA"),c(15,16,13)])
+fimoSum_upD28vNES_upIntsBSJ <- unique(fimo_upD28vNES_upInts[which(fimo_upD28vNES_upInts$BSJdistBin != "NA"),c(15,17,12)])
+fimoSum_upD28vNES_upIntsDist5 <- unique(fimo_upD28vNES_upInts[which(fimo_upD28vNES_upInts$dist5Bin != "NA"),c(15,8,14)])
+
+rm(fimo_upD28vNES_upInts)
+```
+
+##Upstream introns of circs Up at D28vD5
+```{r}
+#D28vD5:
+fimo_upD28vD5_upInts <- read.delim("upD28vD5_upInts_fimo.tsv")
+fimo_upD28vD5_upInts$intronLength <- with(upIntrons, intronLength[match(fimo_upD28vD5_upInts$sequence_name, intronID)])
+#seperate "+" strand introns
+fimo_upD28vD5_upIntsPos <- fimo_upD28vD5_upInts[which(fimo_upD28vD5_upInts$sequence_name %in% upIntrons_pos$intronID),]
+#calculate motif distance relative to BSJ site
+fimo_upD28vD5_upIntsPos$BSJdist <- fimo_upD28vD5_upIntsPos$intronLength - fimo_upD28vD5_upIntsPos$stop
+#calculate motif distance relative to intronic end distal from the BSJ
+fimo_upD28vD5_upIntsPos$dist <- fimo_upD28vD5_upIntsPos$start
+#calculate motif distance from 5'end:
+fimo_upD28vD5_upIntsPos$dist5 <- fimo_upD28vD5_upIntsPos$start
+
+#repeat for upIntrons on "-" strand (inverse):
+fimo_upD28vD5_upIntsNeg <- fimo_upD28vD5_upInts[which(fimo_upD28vD5_upInts$sequence_name %in% upIntrons_neg$intronID),]
+fimo_upD28vD5_upIntsNeg$BSJdist <- fimo_upD28vD5_upIntsNeg$start
+fimo_upD28vD5_upIntsNeg$dist <- fimo_upD28vD5_upIntsNeg$intronLength - fimo_upD28vD5_upIntsNeg$stop
+fimo_upD28vD5_upIntsNeg$dist5 <- fimo_upD28vD5_upIntsNeg$start
+
+#merge
+fimo_upD28vD5_upInts <- rbind(fimo_upD28vD5_upIntsPos[,c(3,11:14)], fimo_upD28vD5_upIntsNeg[,c(3,11:14)])
+rm(fimo_upD28vD5_upIntsPos, fimo_upD28vD5_upIntsNeg)
+#bin
+fimo_upD28vD5_upInts$BSJdistBin <- cut(fimo_upD28vD5_upInts$BSJdist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_upD28vD5_upInts$distBin <- cut(fimo_upD28vD5_upInts$dist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_upD28vD5_upInts$dist5Bin <- cut(fimo_upD28vD5_upInts$dist5, breaks = fimo_breaks, labels=fimo_tags)
+
+#summarise
+fimo_upD28vD5_upInts <- fimo_upD28vD5_upInts %>% group_by(BSJdistBin) %>% mutate(BSJdistFreq=n())
+fimo_upD28vD5_upInts <- fimo_upD28vD5_upInts %>% group_by(distBin) %>% mutate(distFreq=n())
+fimo_upD28vD5_upInts <- fimo_upD28vD5_upInts %>% group_by(dist5Bin) %>% mutate(dist5Freq=n())
+
+#normalise by number of circRNAs
+fimo_upD28vD5_upInts$BSJdistFreqNorm <- as.numeric(fimo_upD28vD5_upInts$BSJdistFreq)/length(upD28vD5_upInts$id)
+fimo_upD28vD5_upInts$distFreqNorm <- as.numeric(fimo_upD28vD5_upInts$distFreq)/length(upD28vD5_upInts$id)
+fimo_upD28vD5_upInts$dist5FreqNorm <- as.numeric(fimo_upD28vD5_upInts$dist5Freq)/length(upD28vD5_upInts$id)
+
+
+#Create group column for plotting
+fimo_upD28vD5_upInts$group <- rep("upD28vD5", length(fimo_upD28vD5_upInts$sequence_name))
+fimo_upD28vD5_upInts$distLabels <- paste0("+",fimo_upD28vD5_upInts$distBin)
+fimo_upD28vD5_upInts$BSJdistLabels <- paste0("+",fimo_upD28vD5_upInts$BSJdistBin)
+#Summarise
+fimoSum_upD28vD5_upIntsDist <- unique(fimo_upD28vD5_upInts[which(fimo_upD28vD5_upInts$distBin != "NA"),c(15,16,13)])
+fimoSum_upD28vD5_upIntsBSJ <- unique(fimo_upD28vD5_upInts[which(fimo_upD28vD5_upInts$BSJdistBin != "NA"),c(15,17,12)])
+fimoSum_upD28vD5_upIntsDist5 <- unique(fimo_upD28vD5_upInts[which(fimo_upD28vD5_upInts$dist5Bin != "NA"),c(15,8,14)])
+
+rm(fimo_upD28vD5_upInts)
+```
+
+##Upstream introns of circs down at D28vNES
+```{r}
+#D28vNES downregulated:
+fimo_dwnD28vNES_upInts <- read.delim("dwnD28vNES_upInts_fimo.tsv")
+fimo_dwnD28vNES_upInts$intronLength <- with(upIntrons, intronLength[match(fimo_dwnD28vNES_upInts$sequence_name, intronID)])
+#seperate "+" strand introns
+fimo_dwnD28vNES_upIntsPos <- fimo_dwnD28vNES_upInts[which(fimo_dwnD28vNES_upInts$sequence_name %in% upIntrons_pos$intronID),]
+#calculate motif distance relative to BSJ site
+fimo_dwnD28vNES_upIntsPos$BSJdist <- fimo_dwnD28vNES_upIntsPos$intronLength - fimo_dwnD28vNES_upIntsPos$stop
+#calculate motif distance relative to intronic end distal from the BSJ
+fimo_dwnD28vNES_upIntsPos$dist <- fimo_dwnD28vNES_upIntsPos$start
+#calculate motif distance from 5'end:
+fimo_dwnD28vNES_upIntsPos$dist5 <- fimo_dwnD28vNES_upIntsPos$start
+
+#repeat for upIntrons on "-" strand (inverse):
+fimo_dwnD28vNES_upIntsNeg <- fimo_dwnD28vNES_upInts[which(fimo_dwnD28vNES_upInts$sequence_name %in% upIntrons_neg$intronID),]
+fimo_dwnD28vNES_upIntsNeg$BSJdist <- fimo_dwnD28vNES_upIntsNeg$start
+fimo_dwnD28vNES_upIntsNeg$dist <- fimo_dwnD28vNES_upIntsNeg$intronLength - fimo_dwnD28vNES_upIntsNeg$stop
+fimo_dwnD28vNES_upIntsNeg$dist5 <- fimo_dwnD28vNES_upIntsNeg$start
+
+#merge
+fimo_dwnD28vNES_upInts <- rbind(fimo_dwnD28vNES_upIntsPos[,c(3,11:14)], fimo_dwnD28vNES_upIntsNeg[,c(3,11:14)])
+rm(fimo_dwnD28vNES_upIntsPos, fimo_dwnD28vNES_upIntsNeg)
+#bin
+fimo_dwnD28vNES_upInts$BSJdistBin <- cut(fimo_dwnD28vNES_upInts$BSJdist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_dwnD28vNES_upInts$distBin <- cut(fimo_dwnD28vNES_upInts$dist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_dwnD28vNES_upInts$dist5Bin <- cut(fimo_dwnD28vNES_upInts$dist5, breaks = fimo_breaks, labels=fimo_tags)
+
+#summarise
+fimo_dwnD28vNES_upInts <- fimo_dwnD28vNES_upInts %>% group_by(BSJdistBin) %>% mutate(BSJdistFreq=n())
+fimo_dwnD28vNES_upInts <- fimo_dwnD28vNES_upInts %>% group_by(distBin) %>% mutate(distFreq=n())
+fimo_dwnD28vNES_upInts <- fimo_dwnD28vNES_upInts %>% group_by(dist5Bin) %>% mutate(dist5Freq=n())
+
+#normalise by number of circRNAs
+fimo_dwnD28vNES_upInts$BSJdistFreqNorm <- as.numeric(fimo_dwnD28vNES_upInts$BSJdistFreq)/length(dwnD28vNES_upInts$id)
+fimo_dwnD28vNES_upInts$distFreqNorm <- as.numeric(fimo_dwnD28vNES_upInts$distFreq)/length(dwnD28vNES_upInts$id)
+fimo_dwnD28vNES_upInts$dist5FreqNorm <- as.numeric(fimo_dwnD28vNES_upInts$dist5Freq)/length(dwnD28vNES_upInts$id)
+
+
+#Create group column for plotting
+fimo_dwnD28vNES_upInts$group <- rep("dwnD28vNES", length(fimo_dwnD28vNES_upInts$sequence_name))
+fimo_dwnD28vNES_upInts$distLabels <- paste0("+",fimo_dwnD28vNES_upInts$distBin)
+fimo_dwnD28vNES_upInts$BSJdistLabels <- paste0("+",fimo_dwnD28vNES_upInts$BSJdistBin)
+#Summarise
+fimoSum_dwnD28vNES_upIntsDist <- unique(fimo_dwnD28vNES_upInts[which(fimo_dwnD28vNES_upInts$distBin != "NA"),c(15,16,13)])
+fimoSum_dwnD28vNES_upIntsBSJ <- unique(fimo_dwnD28vNES_upInts[which(fimo_dwnD28vNES_upInts$BSJdistBin != "NA"),c(15,17,12)])
+fimoSum_dwnD28vNES_upIntsDist5 <- unique(fimo_dwnD28vNES_upInts[which(fimo_dwnD28vNES_upInts$dist5Bin != "NA"),c(15,8,14)])
+
+rm(fimo_dwnD28vNES_upInts)
+```
+
+##Upstream introns of circs down at D28vD5
+```{r}
+#D28vNES downregulated:
+fimo_dwnD28vD5_upInts <- read.delim("dwnD28vD5_upInts_fimo.tsv")
+fimo_dwnD28vD5_upInts$intronLength <- with(upIntrons, intronLength[match(fimo_dwnD28vD5_upInts$sequence_name, intronID)])
+#seperate "+" strand introns
+fimo_dwnD28vD5_upIntsPos <- fimo_dwnD28vD5_upInts[which(fimo_dwnD28vD5_upInts$sequence_name %in% upIntrons_pos$intronID),]
+#calculate motif distance relative to BSJ site
+fimo_dwnD28vD5_upIntsPos$BSJdist <- fimo_dwnD28vD5_upIntsPos$intronLength - fimo_dwnD28vD5_upIntsPos$stop
+#calculate motif distance relative to intronic end distal from the BSJ
+fimo_dwnD28vD5_upIntsPos$dist <- fimo_dwnD28vD5_upIntsPos$start
+#calculate motif distance from 5'end:
+fimo_dwnD28vD5_upIntsPos$dist5 <- fimo_dwnD28vD5_upIntsPos$start
+
+#repeat for upIntrons on "-" strand (inverse):
+fimo_dwnD28vD5_upIntsNeg <- fimo_dwnD28vD5_upInts[which(fimo_dwnD28vD5_upInts$sequence_name %in% upIntrons_neg$intronID),]
+fimo_dwnD28vD5_upIntsNeg$BSJdist <- fimo_dwnD28vD5_upIntsNeg$start
+fimo_dwnD28vD5_upIntsNeg$dist <- fimo_dwnD28vD5_upIntsNeg$intronLength - fimo_dwnD28vD5_upIntsNeg$stop
+fimo_dwnD28vD5_upIntsNeg$dist5 <- fimo_dwnD28vD5_upIntsNeg$start
+
+#merge
+fimo_dwnD28vD5_upInts <- rbind(fimo_dwnD28vD5_upIntsPos[,c(3,11:14)], fimo_dwnD28vD5_upIntsNeg[,c(3,11:14)])
+rm(fimo_dwnD28vD5_upIntsPos, fimo_dwnD28vD5_upIntsNeg)
+#bin
+fimo_dwnD28vD5_upInts$BSJdistBin <- cut(fimo_dwnD28vD5_upInts$BSJdist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_dwnD28vD5_upInts$distBin <- cut(fimo_dwnD28vD5_upInts$dist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_dwnD28vD5_upInts$dist5Bin <- cut(fimo_dwnD28vD5_upInts$dist5, breaks = fimo_breaks, labels=fimo_tags)
+
+#summarise
+fimo_dwnD28vD5_upInts <- fimo_dwnD28vD5_upInts %>% group_by(BSJdistBin) %>% mutate(BSJdistFreq=n())
+fimo_dwnD28vD5_upInts <- fimo_dwnD28vD5_upInts %>% group_by(distBin) %>% mutate(distFreq=n())
+fimo_dwnD28vD5_upInts <- fimo_dwnD28vD5_upInts %>% group_by(dist5Bin) %>% mutate(dist5Freq=n())
+
+#normalise by number of circRNAs
+fimo_dwnD28vD5_upInts$BSJdistFreqNorm <- as.numeric(fimo_dwnD28vD5_upInts$BSJdistFreq)/length(dwnD28vD5_upInts$id)
+fimo_dwnD28vD5_upInts$distFreqNorm <- as.numeric(fimo_dwnD28vD5_upInts$distFreq)/length(dwnD28vD5_upInts$id)
+fimo_dwnD28vD5_upInts$dist5FreqNorm <- as.numeric(fimo_dwnD28vD5_upInts$dist5Freq)/length(dwnD28vD5_upInts$id)
+
+
+#Create group column for plotting
+fimo_dwnD28vD5_upInts$group <- rep("dwnD28vD5", length(fimo_dwnD28vD5_upInts$sequence_name))
+fimo_dwnD28vD5_upInts$distLabels <- paste0("+",fimo_dwnD28vD5_upInts$distBin)
+fimo_dwnD28vD5_upInts$BSJdistLabels <- paste0("+",fimo_dwnD28vD5_upInts$BSJdistBin)
+#Summarise
+fimoSum_dwnD28vD5_upIntsDist <- unique(fimo_dwnD28vD5_upInts[which(fimo_dwnD28vD5_upInts$distBin != "NA"),c(15,16,13)])
+fimoSum_dwnD28vD5_upIntsBSJ <- unique(fimo_dwnD28vD5_upInts[which(fimo_dwnD28vD5_upInts$BSJdistBin != "NA"),c(15,17,12)])
+fimoSum_dwnD28vD5_upIntsDist5 <- unique(fimo_dwnD28vD5_upInts[which(fimo_dwnD28vD5_upInts$dist5Bin != "NA"),c(15,8,14)])
+
+rm(fimo_dwnD28vD5_upInts)
+```
+
+##All upstream introns
+```{r}
+#allUpstream introns
+fimo_upInts <- read.delim("upInts_fimo.tsv")
+fimo_upInts$intronLength <- with(upIntrons, intronLength[match(fimo_upInts$sequence_name, intronID)])
+#seperate "+" strand introns
+fimo_upIntsPos <- fimo_upInts[which(fimo_upInts$sequence_name %in% upIntrons_pos$intronID),]
+#calculate motif distance relative to BSJ site
+fimo_upIntsPos$BSJdist <- fimo_upIntsPos$intronLength - fimo_upIntsPos$stop
+#calculate motif distance relative to intronic end distal from the BSJ
+fimo_upIntsPos$dist <- fimo_upIntsPos$start
+#calculate motif distance from 5'end:
+fimo_upIntsPos$dist5 <- fimo_upIntsPos$start
+
+#repeat for upIntrons on "-" strand (inverse):
+fimo_upIntsNeg <- fimo_upInts[which(fimo_upInts$sequence_name %in% upIntrons_neg$intronID),]
+fimo_upIntsNeg$BSJdist <- fimo_upIntsNeg$start
+fimo_upIntsNeg$dist <- fimo_upIntsNeg$intronLength - fimo_upIntsNeg$stop
+fimo_upIntsNeg$dist5 <- fimo_upIntsNeg$start
+
+#merge
+fimo_upInts <- rbind(fimo_upIntsPos[,c(3,11:14)], fimo_upIntsNeg[,c(3,11:14)])
+rm(fimo_upIntsPos, fimo_upIntsNeg)
+#bin
+fimo_upInts$BSJdistBin <- cut(fimo_upInts$BSJdist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_upInts$distBin <- cut(fimo_upInts$dist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_upInts$dist5Bin <- cut(fimo_upInts$dist5, breaks = fimo_breaks, labels=fimo_tags)
+
+#summarise
+fimo_upInts <- fimo_upInts %>% group_by(BSJdistBin) %>% mutate(BSJdistFreq=n())
+fimo_upInts <- fimo_upInts %>% group_by(distBin) %>% mutate(distFreq=n())
+fimo_upInts <- fimo_upInts %>% group_by(dist5Bin) %>% mutate(dist5Freq=n())
+
+#normalise by number of circRNAs
+fimo_upInts$BSJdistFreqNorm <- as.numeric(fimo_upInts$BSJdistFreq)/length(upIntrons$id)
+fimo_upInts$distFreqNorm <- as.numeric(fimo_upInts$distFreq)/length(upIntrons$id)
+fimo_upInts$dist5FreqNorm <- as.numeric(fimo_upInts$dist5Freq)/length(upIntrons$id)
+
+
+#Create group column for plotting
+fimo_upInts$group <- rep("allCircs", length(fimo_upInts$sequence_name))
+fimo_upInts$distLabels <- paste0("+",fimo_upInts$distBin)
+fimo_upInts$BSJdistLabels <- paste0("+",fimo_upInts$BSJdistBin)
+#Summarise
+fimoSum_upIntsDist <- unique(fimo_upInts[which(fimo_upInts$distBin != "NA"),c(15,16,13)])
+fimoSum_upIntsBSJ <- unique(fimo_upInts[which(fimo_upInts$BSJdistBin != "NA"),c(15,17,12)])
+fimoSum_upIntsDist5 <- unique(fimo_upInts[which(fimo_upInts$dist5Bin != "NA"),c(15,8,14)])
+
+rm(fimo_upInts)
+```
+
+##Downstream introns of circs Up at D28vNES
+```{r}
+#calculate length off upstream introns
+dwnIntrons$intronLength <- dwnIntrons$stop - dwnIntrons$start
+#seperate upstream introns on + and - strands
+dwnIntrons_pos <- dwnIntrons[which(dwnIntrons$strand == "+"),]
+dwnIntrons_neg <- dwnIntrons[which(dwnIntrons$strand == "-"),]
+
+#Load upstream data:
+fimo_upD28vNES_dwnInts <- read.delim("upD28vNES_dwnInts_fimo.tsv")
+fimo_upD28vNES_dwnInts$intronLength <- with(dwnIntrons, intronLength[match(fimo_upD28vNES_dwnInts$sequence_name, intronID)])
+#seperate "+" strand introns
+fimo_upD28vNES_dwnIntsPos <- fimo_upD28vNES_dwnInts[which(fimo_upD28vNES_dwnInts$sequence_name %in% dwnIntrons_pos$intronID),]
+#calculate motif distance relative to BSJ site
+fimo_upD28vNES_dwnIntsPos$BSJdist <- fimo_upD28vNES_dwnIntsPos$start
+#calculate motif distance relative to intronic end distal from the BSJ
+fimo_upD28vNES_dwnIntsPos$dist <- fimo_upD28vNES_dwnIntsPos$intronLength - fimo_upD28vNES_dwnIntsPos$stop
+#calculate motif distance relative to 5' end:
+fimo_upD28vNES_dwnIntsPos$dist5 <- fimo_upD28vNES_dwnIntsPos$start
+
+#repeat for upIntrons on "-" strand (inverse):
+fimo_upD28vNES_dwnIntsNeg <- fimo_upD28vNES_dwnInts[which(fimo_upD28vNES_dwnInts$sequence_name %in% dwnIntrons_neg$intronID),]
+
+fimo_upD28vNES_dwnIntsNeg$BSJdist <- fimo_upD28vNES_dwnIntsNeg$intronLength - fimo_upD28vNES_dwnIntsNeg$stop 
+fimo_upD28vNES_dwnIntsNeg$dist <- fimo_upD28vNES_dwnIntsNeg$start
+fimo_upD28vNES_dwnIntsNeg$dist5 <- fimo_upD28vNES_dwnIntsNeg$intronLength - fimo_upD28vNES_dwnIntsNeg$stop
+
+#merge
+fimo_upD28vNES_dwnInts <- rbind(fimo_upD28vNES_dwnIntsPos[,c(3,11:14)], fimo_upD28vNES_dwnIntsNeg[,c(3,11:14)])
+rm(fimo_upD28vNES_dwnIntsPos, fimo_upD28vNES_dwnIntsNeg)
+#bin
+fimo_upD28vNES_dwnInts$BSJdistBin <- cut(fimo_upD28vNES_dwnInts$BSJdist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_upD28vNES_dwnInts$distBin <- cut(fimo_upD28vNES_dwnInts$dist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_upD28vNES_dwnInts$dist5Bin <- cut(fimo_upD28vNES_dwnInts$dist5, breaks = fimo_breaks, labels=fimo_tags)
+#summarise
+fimo_upD28vNES_dwnInts <- fimo_upD28vNES_dwnInts %>% group_by(BSJdistBin) %>% mutate(BSJdistFreq=n())
+fimo_upD28vNES_dwnInts <- fimo_upD28vNES_dwnInts %>% group_by(distBin) %>% mutate(distFreq=n())
+fimo_upD28vNES_dwnInts <- fimo_upD28vNES_dwnInts %>% group_by(dist5Bin) %>% mutate(dist5Freq=n())
+#normalise by number of circRNAs
+fimo_upD28vNES_dwnInts$BSJdistFreqNorm <- as.numeric(fimo_upD28vNES_dwnInts$BSJdistFreq)/length(upD28vNES_dwnInts$id)
+fimo_upD28vNES_dwnInts$distFreqNorm <- as.numeric(fimo_upD28vNES_dwnInts$distFreq)/length(upD28vNES_dwnInts$id)
+fimo_upD28vNES_dwnInts$dist5FreqNorm <- as.numeric(fimo_upD28vNES_dwnInts$dist5Freq)/length(upD28vNES_dwnInts$id)
+#Create group column for plotting
+fimo_upD28vNES_dwnInts$group <- rep("upD28vNES", length(fimo_upD28vNES_dwnInts$sequence_name))
+fimo_upD28vNES_dwnInts$distLabels <- paste0("-",fimo_upD28vNES_dwnInts$distBin)
+fimo_upD28vNES_dwnInts$BSJdistLabels <- paste0("-",fimo_upD28vNES_dwnInts$BSJdistBin)
+#Summarise
+fimoSum_upD28vNES_dwnIntsDist <- unique(fimo_upD28vNES_dwnInts[which(fimo_upD28vNES_dwnInts$distBin != "NA"),c(15,16,13)])
+fimoSum_upD28vNES_dwnIntsBSJ <- unique(fimo_upD28vNES_dwnInts[which(fimo_upD28vNES_dwnInts$BSJdistBin != "NA"),c(15,17,12)])
+fimoSum_upD28vNES_dwnIntsDist5 <- unique(fimo_upD28vNES_dwnInts[which(fimo_upD28vNES_dwnInts$dist5Bin != "NA"),c(15,8,14)])
+
+rm(fimo_upD28vNES_dwnInts)
+```
+
+##Downstream introns of circs Up at D28vD5
+```{r}
+#D28vD5
+fimo_upD28vD5_dwnInts <- read.delim("upD28vD5_dwnInts_fimo.tsv")
+fimo_upD28vD5_dwnInts$intronLength <- with(dwnIntrons, intronLength[match(fimo_upD28vD5_dwnInts$sequence_name, intronID)])
+#seperate "+" strand introns
+fimo_upD28vD5_dwnIntsPos <- fimo_upD28vD5_dwnInts[which(fimo_upD28vD5_dwnInts$sequence_name %in% dwnIntrons_pos$intronID),]
+#calculate motif distance relative to BSJ site
+fimo_upD28vD5_dwnIntsPos$BSJdist <- fimo_upD28vD5_dwnIntsPos$start
+#calculate motif distance relative to intronic end distal from the BSJ
+fimo_upD28vD5_dwnIntsPos$dist <- fimo_upD28vD5_dwnIntsPos$intronLength - fimo_upD28vD5_dwnIntsPos$stop
+#calculate motif distance relative to 5' end:
+fimo_upD28vD5_dwnIntsPos$dist5 <- fimo_upD28vD5_dwnIntsPos$start
+
+#repeat for upIntrons on "-" strand (inverse):
+fimo_upD28vD5_dwnIntsNeg <- fimo_upD28vD5_dwnInts[which(fimo_upD28vD5_dwnInts$sequence_name %in% dwnIntrons_neg$intronID),]
+
+fimo_upD28vD5_dwnIntsNeg$BSJdist <- fimo_upD28vD5_dwnIntsNeg$intronLength - fimo_upD28vD5_dwnIntsNeg$stop 
+fimo_upD28vD5_dwnIntsNeg$dist <- fimo_upD28vD5_dwnIntsNeg$start
+fimo_upD28vD5_dwnIntsNeg$dist5 <- fimo_upD28vD5_dwnIntsNeg$intronLength - fimo_upD28vD5_dwnIntsNeg$stop
+
+#merge
+fimo_upD28vD5_dwnInts <- rbind(fimo_upD28vD5_dwnIntsPos[,c(3,11:14)], fimo_upD28vD5_dwnIntsNeg[,c(3,11:14)])
+rm(fimo_upD28vD5_dwnIntsPos, fimo_upD28vD5_dwnIntsNeg)
+#bin
+fimo_upD28vD5_dwnInts$BSJdistBin <- cut(fimo_upD28vD5_dwnInts$BSJdist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_upD28vD5_dwnInts$distBin <- cut(fimo_upD28vD5_dwnInts$dist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_upD28vD5_dwnInts$dist5Bin <- cut(fimo_upD28vD5_dwnInts$dist5, breaks = fimo_breaks, labels=fimo_tags)
+#summarise
+fimo_upD28vD5_dwnInts <- fimo_upD28vD5_dwnInts %>% group_by(BSJdistBin) %>% mutate(BSJdistFreq=n())
+fimo_upD28vD5_dwnInts <- fimo_upD28vD5_dwnInts %>% group_by(distBin) %>% mutate(distFreq=n())
+fimo_upD28vD5_dwnInts <- fimo_upD28vD5_dwnInts %>% group_by(dist5Bin) %>% mutate(dist5Freq=n())
+#normalise by number of circRNAs
+fimo_upD28vD5_dwnInts$BSJdistFreqNorm <- as.numeric(fimo_upD28vD5_dwnInts$BSJdistFreq)/length(upD28vD5_dwnInts$id)
+fimo_upD28vD5_dwnInts$distFreqNorm <- as.numeric(fimo_upD28vD5_dwnInts$distFreq)/length(upD28vD5_dwnInts$id)
+fimo_upD28vD5_dwnInts$dist5FreqNorm <- as.numeric(fimo_upD28vD5_dwnInts$dist5Freq)/length(upD28vD5_dwnInts$id)
+#Create group column for plotting
+fimo_upD28vD5_dwnInts$group <- rep("upD28vD5", length(fimo_upD28vD5_dwnInts$sequence_name))
+fimo_upD28vD5_dwnInts$distLabels <- paste0("-",fimo_upD28vD5_dwnInts$distBin)
+fimo_upD28vD5_dwnInts$BSJdistLabels <- paste0("-",fimo_upD28vD5_dwnInts$BSJdistBin)
+#Summarise
+fimoSum_upD28vD5_dwnIntsDist <- unique(fimo_upD28vD5_dwnInts[which(fimo_upD28vD5_dwnInts$distBin != "NA"),c(15,16,13)])
+fimoSum_upD28vD5_dwnIntsBSJ <- unique(fimo_upD28vD5_dwnInts[which(fimo_upD28vD5_dwnInts$BSJdistBin != "NA"),c(15,17,12)])
+fimoSum_upD28vD5_dwnIntsDist5 <- unique(fimo_upD28vD5_dwnInts[which(fimo_upD28vD5_dwnInts$dist5Bin != "NA"),c(15,8,14)])
+
+rm(fimo_upD28vD5_dwnInts)
+```
+
+##Downstream introns of circs down at D28vNES
+```{r}
+#D28vNES downregulated
+fimo_dwnD28vNES_dwnInts <- read.delim("dwnD28vNES_dwnInts_fimo.tsv")
+fimo_dwnD28vNES_dwnInts$intronLength <- with(dwnIntrons, intronLength[match(fimo_dwnD28vNES_dwnInts$sequence_name, intronID)])
+#seperate "+" strand introns
+fimo_dwnD28vNES_dwnIntsPos <- fimo_dwnD28vNES_dwnInts[which(fimo_dwnD28vNES_dwnInts$sequence_name %in% dwnIntrons_pos$intronID),]
+#calculate motif distance relative to BSJ site
+fimo_dwnD28vNES_dwnIntsPos$BSJdist <- fimo_dwnD28vNES_dwnIntsPos$start
+#calculate motif distance relative to intronic end distal from the BSJ
+fimo_dwnD28vNES_dwnIntsPos$dist <- fimo_dwnD28vNES_dwnIntsPos$intronLength - fimo_dwnD28vNES_dwnIntsPos$stop
+#calculate motif distance relative to 5' end:
+fimo_dwnD28vNES_dwnIntsPos$dist5 <- fimo_dwnD28vNES_dwnIntsPos$start
+
+#repeat for upIntrons on "-" strand (inverse):
+fimo_dwnD28vNES_dwnIntsNeg <- fimo_dwnD28vNES_dwnInts[which(fimo_dwnD28vNES_dwnInts$sequence_name %in% dwnIntrons_neg$intronID),]
+
+fimo_dwnD28vNES_dwnIntsNeg$BSJdist <- fimo_dwnD28vNES_dwnIntsNeg$intronLength - fimo_dwnD28vNES_dwnIntsNeg$stop 
+fimo_dwnD28vNES_dwnIntsNeg$dist <- fimo_dwnD28vNES_dwnIntsNeg$start
+fimo_dwnD28vNES_dwnIntsNeg$dist5 <- fimo_dwnD28vNES_dwnIntsNeg$intronLength - fimo_dwnD28vNES_dwnIntsNeg$stop
+
+#merge
+fimo_dwnD28vNES_dwnInts <- rbind(fimo_dwnD28vNES_dwnIntsPos[,c(3,11:14)], fimo_dwnD28vNES_dwnIntsNeg[,c(3,11:14)])
+rm(fimo_dwnD28vNES_dwnIntsPos, fimo_dwnD28vNES_dwnIntsNeg)
+#bin
+fimo_dwnD28vNES_dwnInts$BSJdistBin <- cut(fimo_dwnD28vNES_dwnInts$BSJdist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_dwnD28vNES_dwnInts$distBin <- cut(fimo_dwnD28vNES_dwnInts$dist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_dwnD28vNES_dwnInts$dist5Bin <- cut(fimo_dwnD28vNES_dwnInts$dist5, breaks = fimo_breaks, labels=fimo_tags)
+#summarise
+fimo_dwnD28vNES_dwnInts <- fimo_dwnD28vNES_dwnInts %>% group_by(BSJdistBin) %>% mutate(BSJdistFreq=n())
+fimo_dwnD28vNES_dwnInts <- fimo_dwnD28vNES_dwnInts %>% group_by(distBin) %>% mutate(distFreq=n())
+fimo_dwnD28vNES_dwnInts <- fimo_dwnD28vNES_dwnInts %>% group_by(dist5Bin) %>% mutate(dist5Freq=n())
+#normalise by number of circRNAs
+fimo_dwnD28vNES_dwnInts$BSJdistFreqNorm <- as.numeric(fimo_dwnD28vNES_dwnInts$BSJdistFreq)/length(dwnD28vNES_dwnInts$id)
+fimo_dwnD28vNES_dwnInts$distFreqNorm <- as.numeric(fimo_dwnD28vNES_dwnInts$distFreq)/length(dwnD28vNES_dwnInts$id)
+fimo_dwnD28vNES_dwnInts$dist5FreqNorm <- as.numeric(fimo_dwnD28vNES_dwnInts$dist5Freq)/length(dwnD28vNES_dwnInts$id)
+#Create group column for plotting
+fimo_dwnD28vNES_dwnInts$group <- rep("dwnD28vNES", length(fimo_dwnD28vNES_dwnInts$sequence_name))
+fimo_dwnD28vNES_dwnInts$distLabels <- paste0("-",fimo_dwnD28vNES_dwnInts$distBin)
+fimo_dwnD28vNES_dwnInts$BSJdistLabels <- paste0("-",fimo_dwnD28vNES_dwnInts$BSJdistBin)
+#Summarise
+fimoSum_dwnD28vNES_dwnIntsDist <- unique(fimo_dwnD28vNES_dwnInts[which(fimo_dwnD28vNES_dwnInts$distBin != "NA"),c(15,16,13)])
+fimoSum_dwnD28vNES_dwnIntsBSJ <- unique(fimo_dwnD28vNES_dwnInts[which(fimo_dwnD28vNES_dwnInts$BSJdistBin != "NA"),c(15,17,12)])
+fimoSum_dwnD28vNES_dwnIntsDist5 <- unique(fimo_dwnD28vNES_dwnInts[which(fimo_dwnD28vNES_dwnInts$dist5Bin != "NA"),c(15,8,14)])
+
+rm(fimo_dwnD28vNES_dwnInts)
+```
+
+##Downstream introns of circs down at D28vD5
+```{r}
+#D28vD5 downregulated
+fimo_dwnD28vD5_dwnInts <- read.delim("dwnD28vD5_dwnInts_fimo.tsv")
+fimo_dwnD28vD5_dwnInts$intronLength <- with(dwnIntrons, intronLength[match(fimo_dwnD28vD5_dwnInts$sequence_name, intronID)])
+#seperate "+" strand introns
+fimo_dwnD28vD5_dwnIntsPos <- fimo_dwnD28vD5_dwnInts[which(fimo_dwnD28vD5_dwnInts$sequence_name %in% dwnIntrons_pos$intronID),]
+#calculate motif distance relative to BSJ site
+fimo_dwnD28vD5_dwnIntsPos$BSJdist <- fimo_dwnD28vD5_dwnIntsPos$start
+#calculate motif distance relative to intronic end distal from the BSJ
+fimo_dwnD28vD5_dwnIntsPos$dist <- fimo_dwnD28vD5_dwnIntsPos$intronLength - fimo_dwnD28vD5_dwnIntsPos$stop
+#calculate motif distance relative to 5' end:
+fimo_dwnD28vD5_dwnIntsPos$dist5 <- fimo_dwnD28vD5_dwnIntsPos$start
+
+#repeat for upIntrons on "-" strand (inverse):
+fimo_dwnD28vD5_dwnIntsNeg <- fimo_dwnD28vD5_dwnInts[which(fimo_dwnD28vD5_dwnInts$sequence_name %in% dwnIntrons_neg$intronID),]
+
+fimo_dwnD28vD5_dwnIntsNeg$BSJdist <- fimo_dwnD28vD5_dwnIntsNeg$intronLength - fimo_dwnD28vD5_dwnIntsNeg$stop 
+fimo_dwnD28vD5_dwnIntsNeg$dist <- fimo_dwnD28vD5_dwnIntsNeg$start
+fimo_dwnD28vD5_dwnIntsNeg$dist5 <- fimo_dwnD28vD5_dwnIntsNeg$intronLength - fimo_dwnD28vD5_dwnIntsNeg$stop
+
+#merge
+fimo_dwnD28vD5_dwnInts <- rbind(fimo_dwnD28vD5_dwnIntsPos[,c(3,11:14)], fimo_dwnD28vD5_dwnIntsNeg[,c(3,11:14)])
+rm(fimo_dwnD28vD5_dwnIntsPos, fimo_dwnD28vD5_dwnIntsNeg)
+#bin
+fimo_dwnD28vD5_dwnInts$BSJdistBin <- cut(fimo_dwnD28vD5_dwnInts$BSJdist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_dwnD28vD5_dwnInts$distBin <- cut(fimo_dwnD28vD5_dwnInts$dist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_dwnD28vD5_dwnInts$dist5Bin <- cut(fimo_dwnD28vD5_dwnInts$dist5, breaks = fimo_breaks, labels=fimo_tags)
+#summarise
+fimo_dwnD28vD5_dwnInts <- fimo_dwnD28vD5_dwnInts %>% group_by(BSJdistBin) %>% mutate(BSJdistFreq=n())
+fimo_dwnD28vD5_dwnInts <- fimo_dwnD28vD5_dwnInts %>% group_by(distBin) %>% mutate(distFreq=n())
+fimo_dwnD28vD5_dwnInts <- fimo_dwnD28vD5_dwnInts %>% group_by(dist5Bin) %>% mutate(dist5Freq=n())
+#normalise by number of circRNAs
+fimo_dwnD28vD5_dwnInts$BSJdistFreqNorm <- as.numeric(fimo_dwnD28vD5_dwnInts$BSJdistFreq)/length(dwnD28vD5_dwnInts$id)
+fimo_dwnD28vD5_dwnInts$distFreqNorm <- as.numeric(fimo_dwnD28vD5_dwnInts$distFreq)/length(dwnD28vD5_dwnInts$id)
+fimo_dwnD28vD5_dwnInts$dist5FreqNorm <- as.numeric(fimo_dwnD28vD5_dwnInts$dist5Freq)/length(dwnD28vD5_dwnInts$id)
+#Create group column for plotting
+fimo_dwnD28vD5_dwnInts$group <- rep("dwnD28vD5", length(fimo_dwnD28vD5_dwnInts$sequence_name))
+fimo_dwnD28vD5_dwnInts$distLabels <- paste0("-",fimo_dwnD28vD5_dwnInts$distBin)
+fimo_dwnD28vD5_dwnInts$BSJdistLabels <- paste0("-",fimo_dwnD28vD5_dwnInts$BSJdistBin)
+#Summarise
+fimoSum_dwnD28vD5_dwnIntsDist <- unique(fimo_dwnD28vD5_dwnInts[which(fimo_dwnD28vD5_dwnInts$distBin != "NA"),c(15,16,13)])
+fimoSum_dwnD28vD5_dwnIntsBSJ <- unique(fimo_dwnD28vD5_dwnInts[which(fimo_dwnD28vD5_dwnInts$BSJdistBin != "NA"),c(15,17,12)])
+fimoSum_dwnD28vD5_dwnIntsDist5 <- unique(fimo_dwnD28vD5_dwnInts[which(fimo_dwnD28vD5_dwnInts$dist5Bin != "NA"),c(15,8,14)])
+
+rm(fimo_dwnD28vD5_dwnInts)
+```
+
+##All Downstream introns
+```{r}
+#downstream introns from all circRNAs
+fimo_dwnInts <- read.delim("dwnD28vNES_dwnInts_fimo.tsv")
+fimo_dwnInts$intronLength <- with(dwnIntrons, intronLength[match(fimo_dwnInts$sequence_name, intronID)])
+#seperate "+" strand introns
+fimo_dwnIntsPos <- fimo_dwnInts[which(fimo_dwnInts$sequence_name %in% dwnIntrons_pos$intronID),]
+#calculate motif distance relative to BSJ site
+fimo_dwnIntsPos$BSJdist <- fimo_dwnIntsPos$start
+#calculate motif distance relative to intronic end distal from the BSJ
+fimo_dwnIntsPos$dist <- fimo_dwnIntsPos$intronLength - fimo_dwnIntsPos$stop
+#calculate motif distance relative to 5' end:
+fimo_dwnIntsPos$dist5 <- fimo_dwnIntsPos$start
+
+#repeat for upIntrons on "-" strand (inverse):
+fimo_dwnIntsNeg <- fimo_dwnInts[which(fimo_dwnInts$sequence_name %in% dwnIntrons_neg$intronID),]
+
+fimo_dwnIntsNeg$BSJdist <- fimo_dwnIntsNeg$intronLength - fimo_dwnIntsNeg$stop 
+fimo_dwnIntsNeg$dist <- fimo_dwnIntsNeg$start
+fimo_dwnIntsNeg$dist5 <- fimo_dwnIntsNeg$intronLength - fimo_dwnIntsNeg$stop
+
+#merge
+fimo_dwnInts <- rbind(fimo_dwnIntsPos[,c(3,11:14)], fimo_dwnIntsNeg[,c(3,11:14)])
+rm(fimo_dwnIntsPos, fimo_dwnIntsNeg)
+#bin
+fimo_dwnInts$BSJdistBin <- cut(fimo_dwnInts$BSJdist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_dwnInts$distBin <- cut(fimo_dwnInts$dist, breaks = fimo_breaks, labels=fimo_tags)
+fimo_dwnInts$dist5Bin <- cut(fimo_dwnInts$dist5, breaks = fimo_breaks, labels=fimo_tags)
+#summarise
+fimo_dwnInts <- fimo_dwnInts %>% group_by(BSJdistBin) %>% mutate(BSJdistFreq=n())
+fimo_dwnInts <- fimo_dwnInts %>% group_by(distBin) %>% mutate(distFreq=n())
+fimo_dwnInts <- fimo_dwnInts %>% group_by(dist5Bin) %>% mutate(dist5Freq=n())
+#normalise by number of circRNAs
+fimo_dwnInts$BSJdistFreqNorm <- as.numeric(fimo_dwnInts$BSJdistFreq)/length(dwnIntrons$id)
+fimo_dwnInts$distFreqNorm <- as.numeric(fimo_dwnInts$distFreq)/length(dwnIntrons$id)
+fimo_dwnInts$dist5FreqNorm <- as.numeric(fimo_dwnInts$dist5Freq)/length(dwnIntrons$id)
+#Create group column for plotting
+fimo_dwnInts$group <- rep("allCircs", length(fimo_dwnInts$sequence_name))
+fimo_dwnInts$distLabels <- paste0("-",fimo_dwnInts$distBin)
+fimo_dwnInts$BSJdistLabels <- paste0("-",fimo_dwnInts$BSJdistBin)
+#Summarise
+fimoSum_dwnIntsDist <- unique(fimo_dwnInts[which(fimo_dwnInts$distBin != "NA"),c(15,16,13)])
+fimoSum_dwnIntsBSJ <- unique(fimo_dwnInts[which(fimo_dwnInts$BSJdistBin != "NA"),c(15,17,12)])
+fimoSum_dwnIntsDist5 <- unique(fimo_dwnInts[which(fimo_dwnInts$dist5Bin != "NA"),c(15,8,14)])
+
+rm(fimo_dwnInts)
+```
+
+##Group and plot data
+```{r}
+#Plot based on motif distance relative to intronic end distal from the BSJ
+#merge data
+fimoSumDist <- rbind(fimoSum_upD28vNES_upIntsDist, fimoSum_upD28vNES_dwnIntsDist, fimoSum_upD28vD5_upIntsDist, fimoSum_upD28vD5_dwnIntsDist, fimoSum_dwnD28vNES_upIntsDist, fimoSum_dwnD28vNES_dwnIntsDist, fimoSum_dwnD28vD5_upIntsDist, fimoSum_dwnD28vD5_dwnIntsDist, fimoSum_upIntsDist, fimoSum_dwnIntsDist)
+#remove individual dataframes
+rm(fimoSum_upD28vNES_upIntsDist, fimoSum_upD28vNES_dwnIntsDist, fimoSum_upD28vD5_upIntsDist, fimoSum_upD28vD5_dwnIntsDist, fimoSum_dwnD28vNES_upIntsDist, fimoSum_dwnD28vNES_dwnIntsDist, fimoSum_dwnD28vD5_upIntsDist, fimoSum_dwnD28vD5_dwnIntsDist, fimoSum_upIntsDist, fimoSum_dwnIntsDist)
+#Create labels 
+orderFimoDist <- c(paste0("+", fimo_tags), paste0("-", rev(fimo_tags)))
+#Make labels ordered factor
+fimoSumDist$distLabels <- factor(fimoSumDist$distLabels, levels = orderFimoDist)
+#Plot as heatmap
+fimoSumDist_HM <- ggplot(fimoSumDist, aes(distLabels, group, fill = distFreqNorm))+
+  geom_tile(colour="white", width = 1)+
+  scale_fill_gradient(low = "white", high = "orange")+
+  theme(axis.text.y=element_text(family = "Helvetica", colour = "black", size = 9),
+        panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        legend.title = element_blank())+
+  scale_y_discrete(expand = c(0,0))
+fimoSumDist_HM
+
+
+#Plot based on motif distance relative to BSJ site
+#merge data
+fimoSumBSJ <- rbind(fimoSum_upD28vNES_upIntsBSJ, fimoSum_upD28vNES_dwnIntsBSJ, fimoSum_upD28vD5_upIntsBSJ, fimoSum_upD28vD5_dwnIntsBSJ, fimoSum_dwnD28vNES_upIntsBSJ, fimoSum_dwnD28vNES_dwnIntsBSJ, fimoSum_dwnD28vD5_upIntsBSJ, fimoSum_dwnD28vD5_dwnIntsBSJ, fimoSum_upIntsBSJ, fimoSum_dwnIntsBSJ)
+#remove individual dataframes
+rm(fimoSum_upD28vNES_upIntsBSJ, fimoSum_upD28vNES_dwnIntsBSJ, fimoSum_upD28vD5_upIntsBSJ, fimoSum_upD28vD5_dwnIntsBSJ, fimoSum_dwnD28vNES_upIntsBSJ, fimoSum_dwnD28vNES_dwnIntsBSJ, fimoSum_dwnD28vD5_upIntsBSJ, fimoSum_dwnD28vD5_dwnIntsBSJ, fimoSum_upIntsBSJ, fimoSum_dwnIntsBSJ)
+
+#Create labels 
+orderFimoBSJ <- c(paste0("+", fimo_tags), paste0("-", rev(fimo_tags)))
+#Make labels ordered factor
+fimoSumBSJ$Labels <- factor(fimoSumBSJ$BSJdistLabels, levels = orderFimoBSJ)
+
+#Plot as heatmap
+fimoSumBSJ_HM <- ggplot(fimoSumBSJ, aes(Labels, group, fill = BSJdistFreqNorm))+
+  geom_tile(colour="white", width = 1)+
+  scale_fill_gradient(low = "white", high = "orange")+
+  theme(axis.text.y=element_text(family = "Helvetica", colour = "black", size = 9),
+        panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        legend.title = element_blank())+
+  scale_y_discrete(expand = c(0,0))
+fimoSumBSJ_HM
+
+
+#5' relative upstream ints:
+fimoSum5up <- rbind(fimoSum_upD28vNES_upIntsDist5, fimoSum_upD28vD5_upIntsDist5, fimoSum_dwnD28vNES_upIntsDist5, fimoSum_dwnD28vD5_upIntsDist5, fimoSum_upIntsDist5)
+rm(fimoSum_upD28vNES_upIntsDist5, fimoSum_upD28vD5_upIntsDist5, fimoSum_dwnD28vNES_upIntsDist5, fimoSum_dwnD28vD5_upIntsDist5, fimoSum_upIntsDist5)
+#To fix scale for consistent colour scale:
+extra<- data.frame(group=rep("extra",10), dist5Bin = fimo_tags, dist5FreqNorm=rep(8.5,10))
+fimoSum5up <- rbind(fimoSum5up, extra)
+rm(extra)
+
+#create labels
+fimoSum5up$dist5Bin <- factor(fimoSum5up$dist5Bin, levels = fimo_tags)
+#make labels ordered factor
+fimoSum5up$group <- factor(fimoSum5up$group, levels = c("extra", "allCircs", "dwnD28vD5", "dwnD28vNES", "upD28vD5", "upD28vNES"))
+
+#plot as heatmap
+fimoSum5up_HM <- ggplot(fimoSum5up, aes(dist5Bin, group, fill = dist5FreqNorm))+
+  geom_tile(colour="white", width = 1)+
+  scale_fill_gradient(low = "white", high = "orange")+
+  theme(axis.text.y=element_text(family = "Helvetica", colour = "black", size = 9),
+        panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        legend.title = element_blank())+
+  scale_y_discrete(expand = c(0,0))
+fimoSum5up_HM
+
+
+#5' relative downstream ints:
+fimoSum5dwn <- rbind(fimoSum_upD28vNES_dwnIntsDist5, fimoSum_upD28vD5_dwnIntsDist5, fimoSum_dwnD28vNES_dwnIntsDist5, fimoSum_dwnD28vD5_dwnIntsDist5, fimoSum_dwnIntsDist5)
+rm(fimoSum_upD28vNES_dwnIntsDist5, fimoSum_upD28vD5_dwnIntsDist5, fimoSum_dwnD28vNES_dwnIntsDist5, fimoSum_dwnD28vD5_dwnIntsDist5, fimoSum_dwnIntsDist5)
+
+#create labels
+fimoSum5dwn$dist5Bin <- factor(fimoSum5dwn$dist5Bin, levels = fimo_tags)
+#plot as heatmap
+fimoSum5dwn_HM <- ggplot(fimoSum5dwn, aes(dist5Bin, group, fill = dist5FreqNorm))+
+  geom_tile(colour="white", width = 1)+
+  scale_fill_gradient(low = "white", high = "orange")+
+  theme(axis.text.y=element_text(family = "Helvetica", colour = "black", size = 9),
+        panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        legend.title = element_blank())+
+  scale_y_discrete(expand = c(0,0))
+fimoSum5dwn_HM
+
+
+
+```
