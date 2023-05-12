@@ -20,7 +20,7 @@ Correspondence: [kristiina.tammimies@ki.se](mailto:kristiina.tammimies@ki.se)
 Here you will find raw count files for circRNAs (reads spanning back-spliced junctions), linear RNAs, and exons.
 The R markdown file includes all codes used for differential expression/exon usage analysis as well as gene ontology and correlative analyses.
 
-#### 2. Viariant Analysis
+#### 2. Variant Analysis
 This directory contains code and data files used to analyse variants in circRNA-forming exons.
 
 #### 3. Intron Analysis
